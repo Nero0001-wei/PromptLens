@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PromptLens 隐私政策</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f5f7fb;
+        --card: #ffffff;
+        --text: #0f172a;
+        --muted: #475569;
+        --line: #e2e8f0;
+        --accent: #2563eb;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Inter", "PingFang SC", "Microsoft YaHei", sans-serif;
+        background: linear-gradient(180deg, #f8fbff 0%, var(--bg) 100%);
+        color: var(--text);
+        line-height: 1.7;
+      }
+
+      .wrap {
+        max-width: 860px;
+        margin: 0 auto;
+        padding: 40px 20px 64px;
+      }
+
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        box-shadow: 0 12px 40px rgba(15, 23, 42, 0.08);
+        overflow: hidden;
+      }
+
+      .hero {
+        padding: 32px 32px 24px;
+        border-bottom: 1px solid var(--line);
+        background:
+          radial-gradient(circle at top right, rgba(37, 99, 235, 0.08), transparent 36%),
+          radial-gradient(circle at top left, rgba(168, 85, 247, 0.08), transparent 32%),
+          #fff;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 6px 12px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--accent);
+        background: rgba(37, 99, 235, 0.08);
+      }
+
+      h1 {
+        margin: 16px 0 8px;
+        font-size: 32px;
+        line-height: 1.2;
+      }
+
+      .meta {
+        margin: 0;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .content {
+        padding: 8px 32px 32px;
+      }
+
+      section {
+        padding-top: 24px;
+      }
+
+      h2 {
+        margin: 0 0 10px;
+        font-size: 20px;
+        line-height: 1.4;
+      }
+
+      p {
+        margin: 0 0 10px;
+      }
+
+      ul {
+        margin: 0;
+        padding-left: 20px;
+      }
+
+      li + li {
+        margin-top: 8px;
+      }
+
+      .note {
+        margin-top: 16px;
+        padding: 14px 16px;
+        border-radius: 14px;
+        background: #f8fafc;
+        border: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .footer {
+        margin-top: 24px;
+        padding-top: 20px;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      a {
+        color: var(--accent);
+      }
+
+      @media (max-width: 640px) {
+        .wrap {
+          padding: 20px 12px 36px;
+        }
+
+        .hero,
+        .content {
+          padding-left: 18px;
+          padding-right: 18px;
+        }
+
+        h1 {
+          font-size: 26px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="wrap">
+      <article class="card">
+        <header class="hero">
+          <div class="badge">PromptLens</div>
+          <h1>隐私政策</h1>
+          <p class="meta">最后更新：2026-04-24</p>
+        </header>
+
+        <div class="content">
+          <section>
+            <h2>1. 我们处理哪些数据</h2>
+            <p>PromptLens 仅在用户主动操作时处理数据，包括：</p>
+            <ul>
+              <li>用户手动上传的图片</li>
+              <li>用户右键选择的网页图片地址</li>
+              <li>用户在扩展设置中填写的后端地址与可选接口令牌</li>
+            </ul>
+          </section>
+
+          <section>
+            <h2>2. 数据如何使用</h2>
+            <p>上述图片数据会发送到你配置的后端服务，用于生成提示词。后端可能进一步调用第三方模型服务处理图片内容。</p>
+            <p>数据仅用于以下目的：</p>
+            <ul>
+              <li>识别图片内容和风格</li>
+              <li>生成正面提示词与负面提示词</li>
+              <li>返回不同模型版本的提示词结果</li>
+            </ul>
+          </section>
+
+          <section>
+            <h2>3. 我们不会做什么</h2>
+            <p>PromptLens 扩展本身不主动上传浏览记录，不采集无关网页内容，不长期保存图片到扩展本地数据库。</p>
+          </section>
+
+          <section>
+            <h2>4. 第三方服务</h2>
+            <p>如果你使用默认部署方案，图片会被发送到你自己的后端，并由后端调用第三方大模型服务。第三方服务的数据处理规则以其官方隐私政策为准。</p>
+          </section>
+
+          <section>
+            <h2>5. 用户控制</h2>
+            <p>你可以随时：</p>
+            <ul>
+              <li>删除或替换本地上传的图片</li>
+              <li>修改或清空扩展设置</li>
+              <li>卸载扩展</li>
+            </ul>
+          </section>
+
+          <section>
+            <h2>6. 联系方式</h2>
+            <p>如果你作为开发者对外发布 PromptLens，建议在这里补充你的联系邮箱、反馈表单或公开主页链接。</p>
+            <div class="note">
+              建议你在正式上线前，把本页中的“联系方式”和“第三方服务说明”替换成你自己的真实信息，再托管到 GitHub Pages、个人网站或其他可公开访问的页面中。
+            </div>
+          </section>
+
+          <footer class="footer">
+            <p>本页面可直接作为 Chrome Web Store 提交时使用的隐私政策页面。</p>
+          </footer>
+        </div>
+      </article>
+    </main>
+  </body>
+</html>

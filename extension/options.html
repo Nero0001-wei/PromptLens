@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PromptLens 设置</title>
+    <link rel="stylesheet" href="inspector.css">
+  </head>
+  <body class="settings-page">
+    <main class="settings-shell">
+      <header class="panel__header">
+        <div class="brand-mark" aria-hidden="true">
+          <img src="assets/logo.svg" alt="">
+        </div>
+        <h1 class="brand-title">PromptLens 设置</h1>
+      </header>
+
+      <section class="settings-body">
+        <section class="settings-card">
+          <h2>后端地址</h2>
+          <p>填写你的阿里云函数计算公网地址。</p>
+          <input id="backendBaseUrl" class="settings-input" type="url" placeholder="https://your-fc-domain.example.com">
+        </section>
+
+        <section class="settings-card">
+          <h2>接口令牌</h2>
+          <p>如果后端配置了 APP_TOKEN，就在这里填写同一个值；没有配置可以留空。</p>
+          <input id="appToken" class="settings-input" type="password" placeholder="可选">
+        </section>
+
+        <button id="saveButton" class="settings-save" type="button">保存设置</button>
+        <p id="saveStatus" class="status-message is-hidden"></p>
+      </section>
+    </main>
+
+    <script src="options.js"></script>
+  </body>
+</html>

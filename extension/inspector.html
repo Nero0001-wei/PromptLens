@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PromptLens</title>
+    <link rel="icon" type="image/svg+xml" href="assets/logo.svg">
+    <link rel="stylesheet" href="inspector.css">
+  </head>
+  <body>
+    <main class="panel">
+      <section class="panel__body">
+        <input id="fileInput" type="file" accept="image/*" hidden>
+
+        <button id="uploadBox" class="upload-box" type="button" aria-label="上传图片">
+          <div id="uploadEmpty" class="upload-box__empty">
+            <div class="upload-box__icon-shell" aria-hidden="true">
+              <svg viewBox="0 0 32 32" focusable="false">
+                <path d="M21.33 6.67h3.34A2.67 2.67 0 0 1 27.33 9.33v13.34a2.67 2.67 0 0 1-2.66 2.66H7.33a2.67 2.67 0 0 1-2.66-2.66V9.33a2.67 2.67 0 0 1 2.66-2.66h3.34" />
+                <path d="M12 6.67h8l1.33 2.66H10.67L12 6.67Z" />
+                <path d="M9.33 22l4.67-4.67L18 21.33l2.67-2.66L24.67 22" />
+                <path d="M21.33 4v5.33" />
+                <path d="M18.67 6.67H24" />
+              </svg>
+            </div>
+            <div class="upload-box__title">点击上传图片</div>
+            <div class="upload-box__hint">支持拖拽上传 JPG, PNG, WEBP</div>
+          </div>
+
+          <div id="uploadPreview" class="upload-box__preview is-hidden">
+            <img id="previewImage" class="upload-box__image" alt="图片预览">
+            <div class="upload-box__overlay">点击图片重新上传</div>
+          </div>
+        </button>
+
+        <button id="generateButton" class="generate-button" type="button" disabled>
+          <span id="generateButtonText">生成提示词</span>
+        </button>
+
+        <p id="statusMessage" class="status-message is-hidden" role="status"></p>
+
+        <section id="resultPanel" class="result-panel is-hidden">
+          <div class="selector-group">
+            <div class="selector-group__label">输出模式</div>
+            <div class="selector-group__buttons">
+              <button class="pill-button is-active" type="button" data-mode="concise">简洁版</button>
+              <button class="pill-button" type="button" data-mode="detailed">详细版</button>
+              <button class="pill-button" type="button" data-mode="pro">专业版</button>
+            </div>
+          </div>
+
+          <div class="selector-group">
+            <div class="selector-group__label">版本选择</div>
+            <div class="selector-group__buttons selector-group__buttons--nowrap">
+              <button class="pill-button is-active" type="button" data-variant="general">通用版</button>
+              <button class="pill-button pill-button--wide" type="button" data-variant="midjourney">Midjourney</button>
+              <button class="pill-button" type="button" data-variant="sdxl">SDXL</button>
+              <button class="pill-button" type="button" data-variant="flux">Flux</button>
+            </div>
+          </div>
+
+          <section class="prompt-card">
+            <div class="prompt-card__head">
+              <h2>当前提示词</h2>
+              <div class="prompt-card__actions">
+                <div class="language-toggle" aria-label="提示词语言切换">
+                  <button id="langEnButton" class="language-toggle__button is-active" type="button" aria-label="显示英文提示词">EN</button>
+                  <button id="langZhButton" class="language-toggle__button" type="button" aria-label="显示中文提示词">中</button>
+                </div>
+                <button id="copyPromptButton" class="copy-button" type="button" aria-label="复制当前提示词">
+                  <svg viewBox="0 0 20 20" focusable="false">
+                    <rect x="7" y="7" width="10" height="10" rx="2"></rect>
+                    <path d="M13 7V5a2 2 0 0 0-2-2H5A2 2 0 0 0 3 5v6a2 2 0 0 0 2 2h2"></path>
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div id="promptOutput" class="text-surface text-surface--large"></div>
+          </section>
+
+          <section class="prompt-card">
+            <div class="prompt-card__head">
+              <h2>负面提示词</h2>
+              <button id="copyNegativeButton" class="copy-button" type="button" aria-label="复制负面提示词">
+                <svg viewBox="0 0 20 20" focusable="false">
+                  <rect x="7" y="7" width="10" height="10" rx="2"></rect>
+                  <path d="M13 7V5a2 2 0 0 0-2-2H5A2 2 0 0 0 3 5v6a2 2 0 0 0 2 2h2"></path>
+                </svg>
+              </button>
+            </div>
+            <div id="negativeOutput" class="text-surface text-surface--small"></div>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <script src="inspector.js"></script>
+  </body>
+</html>

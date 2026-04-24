@@ -1,0 +1,11 @@
+{
+  "name": "image-prompt-reverse-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Aliyun FC backend for reverse prompt MVP",
+  "main": "index.js",
+  "engines": {
+    "node": ">=18"
+  }
+}
+
