@@ -1,0 +1,42 @@
+edition: 3.0.0
+name: image-prompt-reverse-prod
+access: default
+
+vars:
+  region: cn-hangzhou
+  functionName: reverse-prompt-api
+
+resources:
+  reversePromptApi:
+    component: fc3
+    props:
+      region: ${vars.region}
+      description: image-prompt-reverse-backend-prod
+      logConfig: auto
+      functionName: ${vars.functionName}
+      handler: index.handler
+      runtime: nodejs20
+      code: ./backend
+      memorySize: 512
+      timeout: 60
+      cpu: 0.5
+      diskSize: 512
+      environmentVariables:
+        ZHIPU_API_KEY: ${env(ZHIPU_API_KEY)}
+        APP_TOKEN: ${env(APP_TOKEN)}
+        CORS_ORIGIN: ${env(CORS_ORIGIN)}
+        RATE_LIMIT_WINDOW_MS: ${env(RATE_LIMIT_WINDOW_MS)}
+        RATE_LIMIT_MAX_REQUESTS: ${env(RATE_LIMIT_MAX_REQUESTS)}
+        RATE_LIMIT_DISABLED: ${env(RATE_LIMIT_DISABLED)}
+      triggers:
+        - triggerName: httpTrigger
+          triggerType: http
+          description: HTTP trigger for reverse prompt API prod
+          qualifier: LATEST
+          triggerConfig:
+            authType: anonymous
+            disableURLInternet: false
+            methods:
+              - GET
+              - POST
+              - OPTIONS

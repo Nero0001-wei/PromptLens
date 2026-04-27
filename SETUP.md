@@ -18,14 +18,20 @@
 - `STORE_LISTING.md`
 - `RELEASE_CHECKLIST.md`
 - `privacy-policy.html`
-- `deploy.ps1`
-- `s.yaml`
-- `.env.local.example`
+- `deploy-dev.ps1`
+- `deploy-prod.ps1`
+- `deploy-env.ps1`
+- `s.dev.yaml`
+- `s.prod.yaml`
+- `.env.dev.local.example`
+- `.env.prod.local.example`
 - `.gitignore`
 
 不要提交的内容：
 
 - `.env.local`
+- `.env.dev.local`
+- `.env.prod.local`
 - 任何真实密钥
 - 本地部署日志
 - `dist/`
@@ -40,23 +46,35 @@
 
 ### 2. 准备环境变量
 
-复制：
+测试环境复制：
 
 ```text
-.env.local.example
+.env.dev.local.example
 ```
 
 生成：
 
 ```text
-.env.local
+.env.dev.local
 ```
 
-然后填写本机要用的真实值，例如：
+正式环境复制：
+
+```text
+.env.prod.local.example
+```
+
+生成：
+
+```text
+.env.prod.local
+```
+
+然后分别填写测试环境和正式环境要用的真实值，例如：
 
 ```env
-ZHIPU_API_KEY=你的智谱新密钥
-APP_TOKEN=
+ZHIPU_API_KEY=你的智谱密钥
+APP_TOKEN=你的接口访问令牌
 CORS_ORIGIN=*
 RATE_LIMIT_WINDOW_MS=600000
 RATE_LIMIT_MAX_REQUESTS=30
@@ -65,8 +83,10 @@ RATE_LIMIT_DISABLED=false
 
 注意：
 
-- `.env.local` 永远不要提交到 Git
-- 换密钥后，只需要改本机 `.env.local` 再重新部署
+- `.env.dev.local` 和 `.env.prod.local` 永远不要提交到 Git
+- 测试环境和正式环境建议使用不同的 `APP_TOKEN`
+- `ZHIPU_API_KEY` 前期可以共用，正式上线后建议分开管理
+- 换密钥后，只需要改本机对应环境文件再重新部署
 
 ### 3. 配置阿里云 `s config`
 
@@ -100,23 +120,43 @@ s config get --access default
 
 ## 四、部署后端
 
-推荐统一使用项目自带脚本：
+后端已拆成两个环境：
+
+```text
+dev 分支  -> reverse-prompt-api-dev
+main 分支 -> reverse-prompt-api
+```
+
+部署测试环境：
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\deploy.ps1
+.\deploy-dev.ps1
 ```
 
-如果在 CMD 里执行：
+部署正式环境：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\deploy-prod.ps1
+```
+
+如果在 CMD 里执行测试环境部署：
 
 ```cmd
-powershell -ExecutionPolicy Bypass -File D:\图片反推提示词助手\deploy.ps1
+powershell -ExecutionPolicy Bypass -File D:\图片反推提示词助手\deploy-dev.ps1
 ```
 
-部署成功后，可以用这个地址检查健康状态：
+如果在 CMD 里执行正式环境部署：
+
+```cmd
+powershell -ExecutionPolicy Bypass -File D:\图片反推提示词助手\deploy-prod.ps1
+```
+
+部署成功后，终端会输出对应环境的 `system_url`。在浏览器里打开：
 
 ```text
-https://reverseompt-api-uxifbiguie.cn-hangzhou.fcapp.run/health
+https://你的环境地址/health
 ```
 
 ## 五、推荐开发流程
@@ -130,19 +170,21 @@ https://reverseompt-api-uxifbiguie.cn-hangzhou.fcapp.run/health
 
 1. 在 `dev` 分支开发
 2. 本地调试扩展
-3. 本地部署验证后端
+3. 使用 `.\deploy-dev.ps1` 部署并验证测试后端
 4. 提交代码并推送
 5. 另一台电脑拉取最新代码继续开发
 6. 稳定后再合并到 `main`
+7. 使用 `.\deploy-prod.ps1` 部署正式后端
 
 ## 六、换电脑时最容易忘的事
 
 换到另一台电脑后，至少检查：
 
-- [ ] `.env.local` 是否已经创建并填入真实值
+- [ ] `.env.dev.local` 是否已经创建并填入真实值
+- [ ] `.env.prod.local` 是否已经创建并填入真实值
 - [ ] `s config` 是否已配置
 - [ ] 扩展是否重新加载到浏览器
-- [ ] 后端是否已重新部署到线上
+- [ ] 测试后端和正式后端是否按需部署
 
 ## 七、安全建议
 
@@ -162,9 +204,12 @@ extension/
 不要把这些一起上传：
 
 - `backend/`
-- `.env.local`
-- `deploy.ps1`
-- `s.yaml`
+- `.env.dev.local`
+- `.env.prod.local`
+- `deploy-dev.ps1`
+- `deploy-prod.ps1`
+- `s.dev.yaml`
+- `s.prod.yaml`
 - `dist/`
 
 发布前可对照：
