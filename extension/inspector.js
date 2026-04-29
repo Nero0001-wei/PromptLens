@@ -82,6 +82,26 @@ function bindEvents() {
       renderResult(currentResult);
     }
   });
+
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type !== "PROMPTLENS_UPDATE_IMAGE") {
+      return;
+    }
+
+    if (message.reset) {
+      setIdleUploadState();
+      return;
+    }
+
+    if (message.imageSource?.imageUrl) {
+      setCurrentImage({
+        kind: "url",
+        imageUrl: message.imageSource.imageUrl,
+        pageTitle: message.imageSource.pageTitle || "",
+        pageUrl: message.imageSource.pageUrl || ""
+      });
+    }
+  });
 }
 
 async function loadContextMenuImageOnce() {
@@ -272,7 +292,7 @@ async function onGeneratePrompt() {
       body: JSON.stringify(payload)
     });
 
-    const result = await response.json();
+    const result = await readJsonResponse(response, "请求失败");
     if (!response.ok) {
       throw new Error(result.error || "请求失败");
     }
@@ -306,7 +326,10 @@ async function onSelectLanguage(nextLanguage) {
   }
 
   if (nextLanguage === "zh") {
-    await ensureLocalizedBundle();
+    const hasLocalizedBundle = await ensureLocalizedBundle();
+    if (!hasLocalizedBundle) {
+      return;
+    }
   }
 
   currentLanguage = nextLanguage;
@@ -416,17 +439,17 @@ function getCurrentNegativeText() {
 
 async function ensureLocalizedBundle() {
   if (!currentResult) {
-    return;
+    return false;
   }
 
   if (currentResult.localizedBundleFresh && hasUsableLocalizedBundle(currentResult)) {
-    return;
+    return true;
   }
 
   const { backendBaseUrl, appToken } = await chrome.storage.sync.get(["backendBaseUrl", "appToken"]);
   if (!backendBaseUrl) {
     setStatus("请先在设置页配置后端地址。", "error");
-    return;
+    return false;
   }
 
   setStatus("正在切换为中文提示词…", "success");
@@ -445,7 +468,7 @@ async function ensureLocalizedBundle() {
       })
     });
 
-    const translated = await response.json();
+    const translated = await readJsonResponse(response, "中文翻译失败");
     if (!response.ok) {
       throw new Error(translated.error || "中文翻译失败");
     }
@@ -453,12 +476,50 @@ async function ensureLocalizedBundle() {
     currentResult.localizedPromptModes = translated.localizedPromptModes || null;
     currentResult.localizedPromptVariants = translated.localizedPromptVariants || null;
     currentResult.localizedNegativePrompt = translated.localizedNegativePrompt || "";
+    if (!hasUsableLocalizedBundle(currentResult)) {
+      throw new Error("中文翻译结果不可用，请稍后重试");
+    }
+
     currentResult.localizedBundleFresh = true;
     clearStatus();
+    return true;
   } catch (error) {
     console.error(error);
     setStatus(error.message || "中文翻译失败", "error");
+    currentResult.localizedBundleFresh = false;
+    return false;
   }
+}
+
+async function readJsonResponse(response, fallbackMessage) {
+  const text = await response.text();
+  if (!text) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (_error) {
+    const cleaned = normalizeHttpErrorMessage(text, fallbackMessage);
+    if (!response.ok) {
+      throw new Error(cleaned);
+    }
+
+    throw new Error(fallbackMessage);
+  }
+}
+
+function normalizeHttpErrorMessage(text, fallbackMessage) {
+  const value = String(text || "").trim();
+  if (!value) {
+    return fallbackMessage;
+  }
+
+  if (/^Internal Server Error/i.test(value)) {
+    return "服务端临时错误，请稍后重试";
+  }
+
+  return value.slice(0, 180);
 }
 
 function hasUsableLocalizedBundle(result) {

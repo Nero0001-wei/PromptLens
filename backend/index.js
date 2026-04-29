@@ -2,6 +2,8 @@
 
 const ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
 const MODEL_NAME = "glm-4v-flash";
+const TRANSLATION_MODEL_NAME = process.env.ZHIPU_TRANSLATION_MODEL || "glm-4-flash-250414";
+const TRANSLATION_CHUNK_SIZE = parsePositiveInt(process.env.ZHIPU_TRANSLATION_CHUNK_SIZE, 8);
 const MAX_REMOTE_IMAGE_BYTES = 5 * 1024 * 1024;
 const RATE_LIMIT_WINDOW_MS = parsePositiveInt(process.env.RATE_LIMIT_WINDOW_MS, 10 * 60 * 1000);
 const RATE_LIMIT_MAX_REQUESTS = parsePositiveInt(process.env.RATE_LIMIT_MAX_REQUESTS, 30);
@@ -298,7 +300,6 @@ async function buildMetadataResult(metadata) {
     pro: prompt
   };
   const promptVariants = buildPromptVariantMatrix(promptModes);
-  const localizedBundle = await buildLocalizedPromptBundle(promptModes, promptVariants, negativePrompt);
   const styleProfile = emptyStyleProfile();
 
   return {
@@ -314,8 +315,16 @@ async function buildMetadataResult(metadata) {
     styleProfile,
     promptModes,
     promptVariants,
-    ...localizedBundle,
+    ...emptyLocalizedPromptBundle(),
     metadata
+  };
+}
+
+function emptyLocalizedPromptBundle() {
+  return {
+    localizedPromptModes: null,
+    localizedPromptVariants: null,
+    localizedNegativePrompt: ""
   };
 }
 
@@ -572,11 +581,6 @@ async function analyzeImageWithGlm(dataUrl) {
   if (!parsed) {
     const fallbackModes = buildPromptModesFromSinglePrompt(contentText, [], []);
     const fallbackVariants = buildPromptVariantMatrix(fallbackModes);
-    const localizedBundle = await buildLocalizedPromptBundle(
-      fallbackModes,
-      fallbackVariants,
-      "blurry, low quality, bad anatomy, extra fingers, distorted face"
-    );
     return {
       prompt: fallbackModes.detailed,
       negativePrompt: "blurry, low quality, bad anatomy, extra fingers, distorted face",
@@ -589,7 +593,7 @@ async function analyzeImageWithGlm(dataUrl) {
       confidence: 0.4,
       promptModes: fallbackModes,
       promptVariants: fallbackVariants,
-      ...localizedBundle
+      ...emptyLocalizedPromptBundle()
     };
   }
 
@@ -623,7 +627,6 @@ async function analyzeImageWithGlm(dataUrl) {
   );
   const reasoning = normalizeReasoning(String(parsed.reasoning || ""), styleTagsEn, subjectTagsEn);
   const promptVariants = buildPromptVariantMatrix(promptModes);
-  const localizedBundle = await buildLocalizedPromptBundle(promptModes, promptVariants, negativePrompt);
 
   return {
     prompt: promptModes.detailed,
@@ -639,7 +642,7 @@ async function analyzeImageWithGlm(dataUrl) {
     confidence: normalizeConfidence(parsed.confidence),
     promptModes,
     promptVariants,
-    ...localizedBundle
+    ...emptyLocalizedPromptBundle()
   };
 }
 
@@ -1860,51 +1863,77 @@ async function buildLocalizedPromptBundle(promptModes, promptVariants, negativeP
 
   try {
     const translated = await translatePromptBundleWithGlm(apiKey, promptModes, promptVariants, negativePrompt);
-    const mergedBundle = {
-      localizedPromptModes: {
-        concise: translated.promptModes?.concise || promptModes.concise || "",
-        detailed: translated.promptModes?.detailed || promptModes.detailed || promptModes.concise || "",
-        pro: translated.promptModes?.pro || promptModes.pro || promptModes.detailed || promptModes.concise || ""
-      },
-      localizedPromptVariants: {
-        concise: {
-          general: translated.promptVariants?.concise?.general || promptVariants.concise.general || "",
-          midjourney: translated.promptVariants?.concise?.midjourney || promptVariants.concise.midjourney || "",
-          sdxl: translated.promptVariants?.concise?.sdxl || promptVariants.concise.sdxl || "",
-          flux: translated.promptVariants?.concise?.flux || promptVariants.concise.flux || ""
-        },
-        detailed: {
-          general: translated.promptVariants?.detailed?.general || promptVariants.detailed.general || "",
-          midjourney: translated.promptVariants?.detailed?.midjourney || promptVariants.detailed.midjourney || "",
-          sdxl: translated.promptVariants?.detailed?.sdxl || promptVariants.detailed.sdxl || "",
-          flux: translated.promptVariants?.detailed?.flux || promptVariants.detailed.flux || ""
-        },
-        pro: {
-          general: translated.promptVariants?.pro?.general || promptVariants.pro.general || "",
-          midjourney: translated.promptVariants?.pro?.midjourney || promptVariants.pro.midjourney || "",
-          sdxl: translated.promptVariants?.pro?.sdxl || promptVariants.pro.sdxl || "",
-          flux: translated.promptVariants?.pro?.flux || promptVariants.pro.flux || ""
-        }
-      },
-      localizedNegativePrompt: translated.negativePrompt || negativePrompt || ""
-    };
+    let cleanedBundle = cleanTranslatedPromptBundle(translated, promptModes, promptVariants, negativePrompt);
+    let validation = validateTranslatedBundleFidelity(cleanedBundle, promptModes, promptVariants, negativePrompt);
 
-    const normalizedBundle = normalizeLocalizedPromptBundle(mergedBundle);
-    const fallbackBundle = buildLocalizedPromptBundleFallback(promptModes, promptVariants, negativePrompt);
-    const preferredBundle = pickCleanerLocalizedBundle(normalizedBundle, fallbackBundle);
-
-    if (bundleHasChinese(preferredBundle)) {
-      return preferredBundle;
+    if (!validation.ok) {
+      const repaired = await translatePromptBundleWithGlm(apiKey, promptModes, promptVariants, negativePrompt, validation);
+      cleanedBundle = cleanTranslatedPromptBundle(repaired, promptModes, promptVariants, negativePrompt);
+      validation = validateTranslatedBundleFidelity(cleanedBundle, promptModes, promptVariants, negativePrompt);
     }
 
-    return fallbackBundle;
+    if (validation.ok) {
+      return cleanedBundle;
+    }
+
+    console.warn("Prompt localization validation failed:", validation.issues);
+    return bundleLooksTranslated(cleanedBundle) ? cleanedBundle : englishBundle;
   } catch (error) {
     console.error("Prompt localization failed:", error);
-    return buildLocalizedPromptBundleFallback(promptModes, promptVariants, negativePrompt);
+    return englishBundle;
   }
 }
 
-async function translatePromptBundleWithGlm(apiKey, promptModes, promptVariants, negativePrompt) {
+async function translatePromptBundleWithGlm(apiKey, promptModes, promptVariants, negativePrompt, repairContext) {
+  const translationRequest = buildTranslationRequest(promptModes, promptVariants, negativePrompt);
+  const requiredTermHints = collectRequiredTranslationTermsFromBundle(promptModes, promptVariants, negativePrompt);
+  const repairInstructions = repairContext
+    ? {
+        previousTranslationRejected: true,
+        reason: "The previous translation lost source information or left invalid output.",
+        issues: repairContext.issues,
+        requiredAction:
+          "Translate again from the original English only. Preserve every listed subject/object explicitly. Do not shorten into tags."
+      }
+    : undefined;
+
+  const translations = {};
+  for (const entries of chunkArray(translationRequest.entries, TRANSLATION_CHUNK_SIZE)) {
+    Object.assign(
+      translations,
+      await translateEntryChunkWithGlm(apiKey, entries, requiredTermHints, repairInstructions)
+    );
+  }
+
+  return expandTranslatedPromptBundle({ translations }, translationRequest);
+}
+
+async function translateEntryChunkWithGlm(apiKey, entries, requiredTermHints, repairInstructions) {
+  try {
+    return await requestTranslationEntryChunk(apiKey, entries, requiredTermHints, repairInstructions);
+  } catch (error) {
+    if (entries.length <= 1) {
+      throw error;
+    }
+
+    const middleIndex = Math.ceil(entries.length / 2);
+    const left = await translateEntryChunkWithGlm(
+      apiKey,
+      entries.slice(0, middleIndex),
+      requiredTermHints,
+      repairInstructions
+    );
+    const right = await translateEntryChunkWithGlm(
+      apiKey,
+      entries.slice(middleIndex),
+      requiredTermHints,
+      repairInstructions
+    );
+    return { ...left, ...right };
+  }
+}
+
+async function requestTranslationEntryChunk(apiKey, entries, requiredTermHints, repairInstructions) {
   const response = await fetch(ZHIPU_BASE_URL, {
     method: "POST",
     headers: {
@@ -1912,25 +1941,32 @@ async function translatePromptBundleWithGlm(apiKey, promptModes, promptVariants,
       Authorization: `Bearer ${apiKey}`
     },
     body: JSON.stringify({
-      model: MODEL_NAME,
+      model: TRANSLATION_MODEL_NAME,
       temperature: 0.15,
-      max_tokens: 1400,
+      max_tokens: 3000,
       messages: [
         {
           role: "system",
           content:
-            "You translate AI image-generation prompts from English to Simplified Chinese. " +
-            "Return strict JSON only with keys promptModes, promptVariants, negativePrompt. " +
-            "Keep the original structure exactly. Preserve Midjourney and model flags like --ar 3:4, --v 7, SDXL, Flux, CGI, 3D, cyberpunk, sci-fi when needed. " +
-            "Use concise, natural Chinese prompt phrasing, but do not translate command flags."
+            "You are a strict English-to-Simplified-Chinese translator for AI image-generation prompts. " +
+            "Your only task is translating the provided final English prompts sentence by sentence. " +
+            "Do not generate a new prompt. Do not summarize. Do not rewrite style. Do not compress into tags. " +
+            "Do not add any visual information that is not in the English source. " +
+            "Every subject, object, count-like list item, color, material, lighting, composition, environment, and spatial relation in the English source must remain present in Chinese. " +
+            "If the source lists objects such as airplane, truck, ship, containers, boxes, buildings, people, products, or devices, translate every listed object explicitly. " +
+            "Do not replace concrete objects with abstract words like scene, concept, product, logistics, technology, or environment. " +
+            "Return strict JSON only in this shape: {\"translations\":{\"t0\":\"Chinese translation\",\"t1\":\"Chinese translation\"}}. Keep every entry id exactly. " +
+            "Do not output markdown, code fences, explanations, or nested JSON strings. " +
+            "Do not leave ordinary English words in the Chinese result. Translate abbreviations such as CGI, AI, UI, and UX into natural Chinese. " +
+            "Preserve only model names or generation flags such as Midjourney, SDXL, Flux, 3D, --ar, --v, --style."
         },
         {
           role: "user",
           content: JSON.stringify(
             {
-              promptModes,
-              promptVariants,
-              negativePrompt
+              entries,
+              requiredTermHints,
+              repairInstructions
             },
             null,
             2
@@ -1951,7 +1987,112 @@ async function translatePromptBundleWithGlm(apiKey, promptModes, promptVariants,
     throw new Error("GLM translation response did not include valid JSON");
   }
 
-  return parsed;
+  const translations = normalizeTranslationMap(parsed);
+  const missingIds = entries.filter((entry) => !translations[entry.id]).map((entry) => entry.id);
+  if (missingIds.length) {
+    throw new Error(`GLM translation response missed entries: ${missingIds.join(", ")}`);
+  }
+
+  return translations;
+}
+
+function chunkArray(items, size) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function buildTranslationRequest(promptModes, promptVariants, negativePrompt) {
+  const entries = [];
+  const textToId = new Map();
+  const pathToId = {};
+
+  const add = (pathName, text) => {
+    const sourceText = String(text || "").trim();
+    if (!sourceText) {
+      return;
+    }
+
+    let id = textToId.get(sourceText);
+    if (!id) {
+      id = `t${entries.length}`;
+      textToId.set(sourceText, id);
+      entries.push({ id, text: sourceText });
+    }
+
+    pathToId[pathName] = id;
+  };
+
+  add("promptModes.concise", promptModes?.concise);
+  add("promptModes.detailed", promptModes?.detailed || promptModes?.concise);
+  add("promptModes.pro", promptModes?.pro || promptModes?.detailed || promptModes?.concise);
+  add("promptVariants.concise.general", promptVariants?.concise?.general);
+  add("promptVariants.concise.midjourney", promptVariants?.concise?.midjourney);
+  add("promptVariants.concise.sdxl", promptVariants?.concise?.sdxl);
+  add("promptVariants.concise.flux", promptVariants?.concise?.flux);
+  add("promptVariants.detailed.general", promptVariants?.detailed?.general);
+  add("promptVariants.detailed.midjourney", promptVariants?.detailed?.midjourney);
+  add("promptVariants.detailed.sdxl", promptVariants?.detailed?.sdxl);
+  add("promptVariants.detailed.flux", promptVariants?.detailed?.flux);
+  add("promptVariants.pro.general", promptVariants?.pro?.general);
+  add("promptVariants.pro.midjourney", promptVariants?.pro?.midjourney);
+  add("promptVariants.pro.sdxl", promptVariants?.pro?.sdxl);
+  add("promptVariants.pro.flux", promptVariants?.pro?.flux);
+  add("negativePrompt", negativePrompt);
+
+  return { entries, pathToId };
+}
+
+function expandTranslatedPromptBundle(parsed, translationRequest) {
+  const translations = normalizeTranslationMap(parsed);
+  const textForPath = (pathName) => translations[translationRequest.pathToId[pathName]] || translations[pathName] || "";
+
+  return {
+    promptModes: {
+      concise: textForPath("promptModes.concise"),
+      detailed: textForPath("promptModes.detailed"),
+      pro: textForPath("promptModes.pro")
+    },
+    promptVariants: {
+      concise: {
+        general: textForPath("promptVariants.concise.general"),
+        midjourney: textForPath("promptVariants.concise.midjourney"),
+        sdxl: textForPath("promptVariants.concise.sdxl"),
+        flux: textForPath("promptVariants.concise.flux")
+      },
+      detailed: {
+        general: textForPath("promptVariants.detailed.general"),
+        midjourney: textForPath("promptVariants.detailed.midjourney"),
+        sdxl: textForPath("promptVariants.detailed.sdxl"),
+        flux: textForPath("promptVariants.detailed.flux")
+      },
+      pro: {
+        general: textForPath("promptVariants.pro.general"),
+        midjourney: textForPath("promptVariants.pro.midjourney"),
+        sdxl: textForPath("promptVariants.pro.sdxl"),
+        flux: textForPath("promptVariants.pro.flux")
+      }
+    },
+    negativePrompt: textForPath("negativePrompt")
+  };
+}
+
+function normalizeTranslationMap(parsed) {
+  if (parsed.translations && !Array.isArray(parsed.translations) && typeof parsed.translations === "object") {
+    return parsed.translations;
+  }
+
+  if (Array.isArray(parsed.translations)) {
+    return Object.fromEntries(
+      parsed.translations
+        .filter((item) => item && item.id && item.text)
+        .map((item) => [String(item.id), String(item.text)])
+    );
+  }
+
+  return parsed && typeof parsed === "object" ? parsed : {};
 }
 
 function clonePromptVariantMatrix(promptVariants) {
@@ -1971,859 +2112,302 @@ function bundleHasChinese(bundle) {
   );
 }
 
-function buildLocalizedPromptBundleFallback(promptModes, promptVariants, negativePrompt) {
-  return normalizeLocalizedPromptBundle({
-    localizedPromptModes: {
-      concise: fallbackTranslatePromptText(promptModes.concise || ""),
-      detailed: fallbackTranslatePromptText(promptModes.detailed || promptModes.concise || ""),
-      pro: fallbackTranslatePromptText(promptModes.pro || promptModes.detailed || promptModes.concise || "")
-    },
-    localizedPromptVariants: {
-      concise: fallbackTranslateVariantRow(promptVariants.concise),
-      detailed: fallbackTranslateVariantRow(promptVariants.detailed),
-      pro: fallbackTranslateVariantRow(promptVariants.pro)
-    },
-    localizedNegativePrompt: fallbackTranslatePromptText(negativePrompt || "")
-  });
-}
-
-function fallbackTranslateVariantRow(row) {
-  return {
-    general: fallbackTranslatePromptText(row?.general || ""),
-    midjourney: fallbackTranslatePromptText(row?.midjourney || ""),
-    sdxl: fallbackTranslatePromptText(row?.sdxl || ""),
-    flux: fallbackTranslatePromptText(row?.flux || "")
-  };
-}
-
-function fallbackTranslatePromptText(text) {
-  let output = String(text || "");
-  if (!output) {
-    return "";
-  }
-
-  const protectedFlags = [];
-  output = output.replace(/--[a-zA-Z0-9:-]+(?:\s+[a-zA-Z0-9:./-]+)?/g, (match) => {
-    const token = `__FLAG_${protectedFlags.length}__`;
-    protectedFlags.push(match);
-    return token;
-  });
-
-  const replacements = [
-    ["upper-body three-quarter portrait", "上半身三分之四侧身人像"],
-    ["upper-body bust portrait", "上半身胸像"],
-    ["close-up portrait", "近景人像特写"],
-    ["centered object composition", "主体居中构图"],
-    ["clean industrial composition", "干净的工业场景构图"],
-    ["clean architectural composition", "干净的建筑构图"],
-    ["balanced interior composition", "平衡的室内构图"],
-    ["wide scenic composition", "宽幅风景构图"],
-    ["clean poster composition", "干净的海报构图"],
-    ["side-angle upper-body portrait", "侧角度上半身人像"],
-    ["three-quarter side profile", "三分之四侧脸视角"],
-    ["cyberpunk aesthetic", "赛博朋克美学"],
-    ["sci-fi character design", "科幻角色设计"],
-    ["mecha-inspired armor design", "机甲感装甲设计"],
-    ["cybernetic body details", "义体机械细节"],
-    ["clean CGI render", "干净的 CGI 渲染"],
-    ["stylized 3D render", "风格化 3D 渲染"],
-    ["doll-like 3D render", "人偶感 3D 渲染"],
-    ["anime-inspired 3D render", "动漫感 3D 渲染"],
-    ["cool-toned palette", "冷色调配色"],
-    ["soft lighting", "柔和打光"],
-    ["soft clean surfaces", "干净平滑的表面"],
-    ["smooth clean surfaces", "平滑干净的表面"],
-    ["matte fabric texture", "哑光布料质感"],
-    ["industrial scene", "工业场景"],
-    ["clean geometric forms", "干净的几何造型"],
-    ["architectural visualization", "建筑可视化效果"],
-    ["graphic design composition", "平面设计式构图"],
-    ["cute character styling", "可爱角色风格"],
-    ["doll-like character", "人偶感角色"],
-    ["high detail", "高细节"],
-    ["highly detailed", "高细节"],
-    ["best quality", "高质量"],
-    ["masterpiece", "杰作级质感"],
-    ["precise forms", "精准造型"],
-    ["rich material detail", "丰富材质细节"],
-    ["soft global illumination", "柔和全局光照"],
-    ["crisp render quality", "清晰渲染质感"],
-    ["polished stylization", "精修风格化处理"],
-    ["refined lighting", "精致光照"],
-    ["ultra detailed", "超高细节"],
-    ["cinematic composition", "电影感构图"],
-    ["clean composition", "干净构图"],
-    ["female cyborg", "女性义体人"],
-    ["mechanical arm", "机械手臂"],
-    ["robotic armor", "机械装甲"],
-    ["futuristic mask", "未来感面罩"],
-    ["high-tech suit", "高科技战衣"],
-    ["white hair", "白发"],
-    ["blue eyes", "蓝眼睛"],
-    ["pink cheeks", "粉色脸颊"],
-    ["pink blush", "粉色腮红"],
-    ["white hoodie", "白色连帽衫"],
-    ["light blue background", "浅蓝色背景"],
-    ["dark background", "深色背景"],
-    ["soft light blue background", "柔和浅蓝背景"],
-    ["satellite", "卫星"],
-    ["solar panels", "太阳能板"],
-    ["orbiting Earth at night", "在夜晚环绕地球运行"],
-    ["container ship", "集装箱货轮"],
-    ["port", "港口"],
-    ["crane", "起重机"],
-    ["building", "建筑"],
-    ["vehicle", "交通工具"],
-    ["character", "角色"],
-    ["portrait", "人像"],
-    ["background", "背景"],
-    ["cool tones", "冷色调"],
-    ["dramatic lighting", "戏剧化光照"],
-    ["realistic CGI", "写实 CGI"],
-    ["realistic rendering", "写实渲染"],
-    ["3D rendering", "3D 渲染"],
-    ["3D render", "3D 渲染"],
-    ["CGI render", "CGI 渲染"],
-    ["doll-like", "人偶感"],
-    ["cyberpunk", "赛博朋克"],
-    ["sci-fi", "科幻"],
-    ["futuristic", "未来感"],
-    ["high-tech", "高科技"],
-    ["blurred", "模糊"],
-    ["blurry", "模糊"],
-    ["low quality", "低质量"],
-    ["bad anatomy", "结构错误"],
-    ["extra fingers", "多余手指"],
-    ["distorted face", "脸部畸形"],
-    ["warped geometry", "几何结构扭曲"],
-    ["broken perspective", "透视错误"],
-    ["messy composition", "构图杂乱"],
-    ["low detail", "细节不足"]
-  ];
-
-  for (const [from, to] of replacements.sort((a, b) => b[0].length - a[0].length)) {
-    output = output.replace(new RegExp(escapeRegExp(from), "gi"), to);
-  }
-
-  output = output
-    .replace(/\bwith\b/gi, "，带有")
-    .replace(/\bagainst\b/gi, "，背景为")
-    .replace(/\bwearing\b/gi, "，穿着")
-    .replace(/\band\b/gi, "，以及")
-    .replace(/\bof\b/gi, "的")
-    .replace(/\bfrom\b/gi, "从")
-    .replace(/\bview\b/gi, "视角")
-    .replace(/\bcomposition\b/gi, "构图")
-    .replace(/\brendered in\b/gi, "渲染风格为")
-    .replace(/\s+,/g, "，")
-    .replace(/,\s*/g, "，")
-    .replace(/\s{2,}/g, " ")
-    .trim();
-
-  output = output.replace(/__FLAG_(\d+)__/g, (_, index) => protectedFlags[Number(index)] || "");
-  return normalizeLocalizedPromptText(output);
-}
-
-function normalizeLocalizedPromptBundle(bundle) {
-  return {
-    localizedPromptModes: {
-      concise: normalizeLocalizedPromptText(bundle.localizedPromptModes?.concise || ""),
-      detailed: normalizeLocalizedPromptText(bundle.localizedPromptModes?.detailed || ""),
-      pro: normalizeLocalizedPromptText(bundle.localizedPromptModes?.pro || "")
-    },
-    localizedPromptVariants: {
-      concise: normalizeLocalizedVariantRow(bundle.localizedPromptVariants?.concise),
-      detailed: normalizeLocalizedVariantRow(bundle.localizedPromptVariants?.detailed),
-      pro: normalizeLocalizedVariantRow(bundle.localizedPromptVariants?.pro)
-    },
-    localizedNegativePrompt: normalizeLocalizedPromptText(bundle.localizedNegativePrompt || "")
-  };
-}
-
-function normalizeLocalizedVariantRow(row) {
-  return {
-    general: normalizeLocalizedPromptText(row?.general || ""),
-    midjourney: normalizeLocalizedPromptText(row?.midjourney || ""),
-    sdxl: normalizeLocalizedPromptText(row?.sdxl || ""),
-    flux: normalizeLocalizedPromptText(row?.flux || "")
-  };
-}
-
-function normalizeLocalizedPromptText(text) {
-  let output = String(text || "").trim();
-  if (!output) {
-    return "";
-  }
-
-  const protectedFlags = [];
-  output = output.replace(/--[a-zA-Z0-9:-]+(?:\s+[a-zA-Z0-9:./-]+)?/g, (match) => {
-    const token = `__FLAG_${protectedFlags.length}__`;
-    protectedFlags.push(match);
-    return token;
-  });
-
-  const phraseReplacements = [
-    ["character is against a dark background", "背景为深色背景"],
-    ["set against a dark background", "背景为深色背景"],
-    ["set against a soft light blue background", "背景为柔和浅蓝背景"],
-    ["with form from a side angle with focus on her torso and upper body", "侧面视角，重点展示躯干与上半身"],
-    ["with focus on her torso and upper body", "重点展示躯干与上半身"],
-    ["lighting highlighting metallic sheen of her armor and intricate details of her mechanical components", "光照突出装甲的金属光泽与机械部件的复杂细节"],
-    ["lighting highlights contours and metallic surfaces of her armor", "光照突出装甲的轮廓与金属表面"],
-    ["dynamic pose", "动态姿态"],
-    ["sleek black mask covering her face", "覆盖面部的流线型黑色面罩"],
-    ["a high-tech bodysuit", "高科技紧身战衣"],
-    ["high-tech bodysuit", "高科技紧身战衣"],
-    ["yellow and black color scheme", "黄黑配色"],
-    ["black and yellow color scheme", "黑黄配色"],
-    ["high-tech mask", "高科技面罩"],
-    ["sleek black mask", "流线型黑色面罩"],
-    ["mechanical arm", "机械手臂"],
-    ["futuristic design", "未来感设计"],
-    ["futuristic mask", "未来感面罩"],
-    ["dark background", "深色背景"],
-    ["side angle", "侧面视角"],
-    ["focus on her torso and upper body", "重点展示躯干与上半身"],
-    ["focus on torso and upper body", "重点展示躯干与上半身"],
-    ["metallic sheen", "金属光泽"],
-    ["intricate details", "复杂细节"],
-    ["mechanical components", "机械部件"],
-    ["clean CGI render", "干净的 CGI 渲染"],
-    ["cyberpunk aesthetic", "赛博朋克美学"],
-    ["cybernetic body details", "义体机械细节"],
-    ["sci-fi character design", "科幻角色设计"],
-    ["high detail", "高细节"],
-    ["doll-like 3D render", "人偶感 3D 渲染"],
-    ["doll-like character", "人偶感角色"],
-    ["cute character styling", "可爱角色风格"],
-    ["close-up portrait view", "近景人像视角"],
-    ["close-up portrait", "近景人像特写"],
-    ["soft light blue background", "柔和浅蓝背景"],
-    ["light blue background", "浅蓝色背景"],
-    ["white hoodie", "白色连帽衫"],
-    ["white hair", "白发"],
-    ["blue eyes", "蓝眼睛"],
-    ["pink cheeks", "粉色脸颊"],
-    ["pink blush", "粉色腮红"],
-    ["solar panels", "太阳能板"],
-    ["orbiting Earth at night", "在夜晚环绕地球运行"],
-    ["satellite", "卫星"],
-    ["container ship", "集装箱货轮"],
-    ["realistic CGI", "写实 CGI"],
-    ["realistic rendering", "写实渲染"],
-    ["3D rendered", "3D 渲染"],
-    ["3D render", "3D 渲染"],
-    ["3D rendering", "3D 渲染"],
-    ["illustration", "插画"],
-    ["cyberpunk", "赛博朋克"],
-    ["sci-fi", "科幻"],
-    ["futuristic", "未来感"],
-    ["cgi", "CGI"]
-  ];
-
-  for (const [from, to] of phraseReplacements.sort((a, b) => b[0].length - a[0].length)) {
-    output = output.replace(new RegExp(escapeRegExp(from), "gi"), to);
-  }
-
-  const wordReplacements = [
-    ["design", "设计"],
-    ["yellow", "黄色"],
-    ["black", "黑色"],
-    ["mask", "面罩"],
-    ["armor", "装甲"],
-    ["armored suit", "装甲战衣"],
-    ["suit", "战衣"],
-    ["bodysuit", "紧身战衣"],
-    ["torso", "躯干"],
-    ["upper body", "上半身"],
-    ["lighting", "光照"],
-    ["highlighting", "突出"],
-    ["highlight", "突出"],
-    ["form", "轮廓"],
-    ["attire", "服装"],
-    ["pose", "姿态"],
-    ["dynamic", "动态"],
-    ["strength", "力量感"],
-    ["agility", "敏捷感"],
-    ["face", "面部"],
-    ["body", "身体"],
-    ["components", "部件"],
-    ["textures", "纹理"],
-    ["texture", "纹理"],
-    ["color scheme", "配色"],
-    ["focus", "聚焦"],
-    ["patterns", "纹样"],
-    ["smooth", "平滑"],
-    ["glossy", "光泽"],
-    ["dramatic", "戏剧化"],
-    ["soft", "柔和"],
-    ["clean", "干净"],
-    ["female cyborg", "女性义体人"],
-    ["cyborg", "义体人"],
-    ["female", "女性"],
-    ["character", "角色"]
-  ];
-
-  for (const [from, to] of wordReplacements.sort((a, b) => b[0].length - a[0].length)) {
-    output = output.replace(new RegExp(`\\b${escapeRegExp(from)}\\b`, "gi"), to);
-  }
-
-  output = output
-    .replace(/\b(a|an|the)\b/gi, "")
-    .replace(/\b(her|his|their|she|he|they|it)\b/gi, "")
-    .replace(/\b(is|are|was|were|be|being|been|having|with|and|of|from|to|that)\b/gi, "，")
-    .replace(/\b(on|in|at|by|for|into|over|under|below|above)\b/gi, "，")
-    .replace(/[,:;]+/g, "，")
-    .replace(/\s+/g, " ")
-    .replace(/\s*，\s*/g, "，")
-    .replace(/，{2,}/g, "，")
-    .replace(/focus on/gi, "聚焦于")
-    .replace(/highlighting/gi, "突出")
-    .replace(/color scheme/gi, "配色")
-    .replace(/design/gi, "设计")
-    .replace(/\bcharacter\b/gi, "")
-    .replace(/\bstands?\b/gi, "")
-    .replace(/\bappears?\b/gi, "")
-    .replace(/^\s*，/, "")
-    .replace(/，\s*$/, "")
-    .trim();
-
-  output = output.replace(/__FLAG_(\d+)__/g, (_, index) => protectedFlags[Number(index)] || "");
-  return output;
-}
-
-function fallbackTranslatePromptText(text) {
-  let output = String(text || "").trim();
-  if (!output) {
-    return "";
-  }
-
-  const protectedFlags = [];
-  output = output.replace(/--[a-zA-Z0-9:-]+(?:\s+[a-zA-Z0-9:./-]+)?/g, (match) => {
-    const token = `__FLAG_${protectedFlags.length}__`;
-    protectedFlags.push(match);
-    return token;
-  });
-
-  output = applyLocalizedReplacements(output, getLocalizedPhraseReplacements());
-  output = applyLocalizedWordReplacements(output, getLocalizedWordReplacements());
-  output = output.replace(/__FLAG_(\d+)__/g, (_, index) => protectedFlags[Number(index)] || "");
-
-  return normalizeLocalizedPromptText(output);
-}
-
-function normalizeLocalizedPromptText(text) {
-  let output = String(text || "").trim();
-  if (!output) {
-    return "";
-  }
-
-  const protectedFlags = [];
-  output = output.replace(/--[a-zA-Z0-9:-]+(?:\s+[a-zA-Z0-9:./-]+)?/g, (match) => {
-    const token = `__FLAG_${protectedFlags.length}__`;
-    protectedFlags.push(match);
-    return token;
-  });
-
-  output = applyLocalizedReplacements(output, getLocalizedPhraseReplacements());
-  output = applyLocalizedWordReplacements(output, getLocalizedWordReplacements());
-
-  output = output
-    .replace(/\b(a|an|the)\b/gi, " ")
-    .replace(/\b(her|his|their|she|he|they|it)\b/gi, " ")
-    .replace(/\b(is|are|was|were|be|being|been|having)\b/gi, " ")
-    .replace(/\b(with|and|of|from|to|that|on|in|at|by|for|into|over|under|below|above)\b/gi, "，")
-    .replace(/[,:;]+/g, "，")
-    .replace(/，\s*，+/g, "，")
-    .replace(/\s*，\s*/g, "，")
-    .replace(/\s+/g, " ")
-    .replace(/^，+|，+$/g, "")
-    .trim();
-
-  output = output.replace(/__FLAG_(\d+)__/g, (_, index) => protectedFlags[Number(index)] || "");
-
-  return output
-    .replace(/\b(stands?|appears?)\b/gi, "")
-    .replace(/\s+/g, " ")
-    .replace(/，{2,}/g, "，")
-    .replace(/^，+|，+$/g, "")
-    .trim();
-}
-
-function getLocalizedPhraseReplacements() {
-  return [
-    ["with form from a side angle with focus on her torso and upper body", "侧面视角，重点展示躯干与上半身"],
-    ["lighting highlighting metallic sheen of her armor and intricate details of her mechanical components", "光照突出装甲的金属光泽与机械部件的复杂细节"],
-    ["lighting highlights contours and metallic surfaces of her armor", "光照突出装甲轮廓与金属表面"],
-    ["character is against a dark background", "背景为深色背景"],
-    ["set against a dark background", "背景为深色背景"],
-    ["set against a soft light blue background", "背景为柔和浅蓝背景"],
-    ["with focus on her torso and upper body", "重点展示躯干与上半身"],
-    ["focus on her torso and upper body", "重点展示躯干与上半身"],
-    ["focus on torso and upper body", "重点展示躯干与上半身"],
-    ["side-angle upper-body portrait", "侧角度上半身人像"],
-    ["upper-body three-quarter portrait", "上半身四分之三侧身人像"],
-    ["upper-body bust portrait", "上半身胸像人像"],
-    ["three-quarter side profile", "四分之三侧面视角"],
-    ["close-up portrait view", "近景人像视角"],
-    ["close-up portrait", "近景人像特写"],
-    ["centered object composition", "主体居中构图"],
-    ["clean industrial composition", "干净的工业场景构图"],
-    ["clean architectural composition", "干净的建筑构图"],
-    ["balanced interior composition", "平衡的室内构图"],
-    ["wide scenic composition", "宽幅风景构图"],
-    ["clean poster composition", "干净的海报构图"],
-    ["clean composition", "干净构图"],
-    ["clean studio background", "干净的纯色背景"],
-    ["clean geometric forms", "干净的几何造型"],
-    ["industrial scene", "工业场景"],
-    ["architectural visualization", "建筑可视化效果"],
-    ["graphic design composition", "平面设计式构图"],
-    ["cyberpunk aesthetic", "赛博朋克美学"],
-    ["sci-fi character design", "科幻角色设计"],
-    ["mecha-inspired armor design", "机甲感装甲设计"],
-    ["cybernetic body details", "义体机械细节"],
-    ["doll-like 3D render", "人偶感3D渲染"],
-    ["anime-inspired 3D render", "动漫感3D渲染"],
-    ["stylized 3D render", "风格化3D渲染"],
-    ["clean CGI render", "干净的CGI渲染"],
-    ["realistic CGI", "写实CGI"],
-    ["realistic rendering", "写实渲染"],
-    ["3D rendered", "3D渲染"],
-    ["3D rendering", "3D渲染"],
-    ["3D render", "3D渲染"],
-    ["CGI render", "CGI渲染"],
-    ["cool-toned palette", "冷色调配色"],
-    ["soft light blue background", "柔和浅蓝背景"],
-    ["light blue background", "浅蓝色背景"],
-    ["dark background", "深色背景"],
-    ["soft clean surfaces", "干净平滑的表面"],
-    ["smooth clean surfaces", "平滑干净的表面"],
-    ["matte fabric texture", "哑光布料质感"],
-    ["soft global illumination", "柔和全局光照"],
-    ["rich material detail", "丰富材质细节"],
-    ["crisp render quality", "清晰渲染质感"],
-    ["polished stylization", "精修风格化处理"],
-    ["refined lighting", "精致光照"],
-    ["cinematic composition", "电影感构图"],
-    ["cute character styling", "可爱角色风格"],
-    ["doll-like character", "人偶感角色"],
-    ["high-tech bodysuit", "高科技紧身战衣"],
-    ["a high-tech bodysuit", "高科技紧身战衣"],
-    ["yellow and black armored bodysuit", "黄黑配色装甲式紧身战衣"],
-    ["high-tech suit", "高科技战衣"],
-    ["exposed mechanical arm", "外露机械手臂"],
-    ["intricate mechanical detailing", "复杂机械细节"],
-    ["sleek black mask covering her face", "覆盖面部的流线型黑色面罩"],
-    ["sleek black mask", "流线型黑色面罩"],
-    ["high-tech mask", "高科技面罩"],
-    ["futuristic mask", "未来感面罩"],
-    ["futuristic design", "未来感设计"],
-    ["yellow and black color scheme", "黄黑配色"],
-    ["black and yellow color scheme", "黑黄配色"],
-    ["female cyborg", "女性义体人"],
-    ["mechanical arm", "机械手臂"],
-    ["robotic armor", "机械装甲"],
-    ["white hoodie", "白色连帽衫"],
-    ["white hair", "白发"],
-    ["blue eyes", "蓝眼睛"],
-    ["pink cheeks", "粉色脸颊"],
-    ["pink blush", "粉色腮红"],
-    ["orbiting Earth at night", "在夜晚环绕地球运行"],
-    ["solar panels", "太阳能板"],
-    ["container ship", "集装箱货轮"],
-    ["satellite", "卫星"],
-    ["crane", "起重机"],
-    ["building", "建筑"],
-    ["port", "港口"],
-    ["high detail", "高细节"],
-    ["highly detailed", "高细节"],
-    ["ultra detailed", "超高细节"],
-    ["best quality", "高质量"],
-    ["masterpiece", "杰作级质感"],
-    ["precise forms", "精准造型"],
-    ["soft lighting", "柔和打光"],
-    ["dramatic lighting", "戏剧化光照"],
-    ["dynamic pose", "动态姿态"],
-    ["metallic sheen", "金属光泽"],
-    ["intricate details", "复杂细节"],
-    ["mechanical components", "机械部件"],
-    ["deep space background", "深空背景"]
-  ];
-}
-
-function getLocalizedWordReplacements() {
-  return [
-    ["illustration", "插画"],
-    ["cyberpunk", "赛博朋克"],
-    ["sci-fi", "科幻"],
-    ["futuristic", "未来感"],
-    ["high-tech", "高科技"],
-    ["design", "设计"],
-    ["yellow", "黄色"],
-    ["black", "黑色"],
-    ["mask", "面罩"],
-    ["armor", "装甲"],
-    ["armored", "装甲式"],
-    ["suit", "战衣"],
-    ["bodysuit", "紧身战衣"],
-    ["wearing", "穿着"],
-    ["exposed", "外露"],
-    ["sleek", "流线型"],
-    ["torso", "躯干"],
-    ["upper body", "上半身"],
-    ["lighting", "光照"],
-    ["highlighting", "突出"],
-    ["highlight", "突出"],
-    ["form", "轮廓"],
-    ["attire", "服装"],
-    ["pose", "姿态"],
-    ["dynamic", "动态"],
-    ["strength", "力量感"],
-    ["agility", "敏捷感"],
-    ["face", "面部"],
-    ["body", "身体"],
-    ["components", "部件"],
-    ["textures", "纹理"],
-    ["texture", "纹理"],
-    ["patterns", "纹样"],
-    ["smooth", "平滑"],
-    ["glossy", "光泽"],
-    ["dramatic", "戏剧化"],
-    ["soft", "柔和"],
-    ["clean", "干净"],
-    ["cyborg", "义体人"],
-    ["female", "女性"],
-    ["character", "角色"],
-    ["composition", "构图"],
-    ["color scheme", "配色"],
-    ["focus", "聚焦"],
-    ["realistic", "写实"],
-    ["vehicle", "交通工具"],
-    ["portrait", "人像"],
-    ["background", "背景"],
-    ["cool tones", "冷色调"],
-    ["blurry", "模糊"],
-    ["blurred", "模糊"],
-    ["low quality", "低质量"],
-    ["bad anatomy", "结构错误"],
-    ["extra fingers", "多余手指"],
-    ["distorted face", "脸部畸形"],
-    ["warped geometry", "几何结构扭曲"],
-    ["broken perspective", "透视错误"],
-    ["messy composition", "构图杂乱"],
-    ["low detail", "细节不足"]
-  ];
-}
-
-function applyLocalizedReplacements(text, replacements) {
-  let output = String(text || "");
-  for (const [from, to] of replacements.sort((a, b) => b[0].length - a[0].length)) {
-    output = output.replace(new RegExp(escapeRegExp(from), "gi"), to);
-  }
-  return output;
-}
-
-function applyLocalizedWordReplacements(text, replacements) {
-  let output = String(text || "");
-  for (const [from, to] of replacements.sort((a, b) => b[0].length - a[0].length)) {
-    output = output.replace(new RegExp(`\\b${escapeRegExp(from)}\\b`, "gi"), to);
-  }
-  return output;
-}
-
-function fallbackTranslatePromptText(text) {
-  let output = String(text || "").trim();
-  if (!output) {
-    return "";
-  }
-
-  const protectedFlags = [];
-  output = output.replace(/--[a-zA-Z0-9:-]+(?:\s+[a-zA-Z0-9:./-]+)?/g, (match) => {
-    const token = `__FLAG_${protectedFlags.length}__`;
-    protectedFlags.push(match);
-    return token;
-  });
-
-  output = applyLocalizedReplacements(output, getLocalizedPhraseReplacements());
-  output = applyLocalizedWordReplacements(output, getLocalizedWordReplacements());
-  output = output.replace(/__FLAG_(\d+)__/g, (_, index) => protectedFlags[Number(index)] || "");
-
-  return normalizeLocalizedPromptText(output);
-}
-
-function normalizeLocalizedPromptText(text) {
-  let output = String(text || "").trim();
-  if (!output) {
-    return "";
-  }
-
-  const protectedFlags = [];
-  output = output.replace(/--[a-zA-Z0-9:-]+(?:\s+[a-zA-Z0-9:./-]+)?/g, (match) => {
-    const token = `__FLAG_${protectedFlags.length}__`;
-    protectedFlags.push(match);
-    return token;
-  });
-
-  output = applyLocalizedReplacements(output, getLocalizedPhraseReplacements());
-  output = applyLocalizedWordReplacements(output, getLocalizedWordReplacements());
-
-  output = output
-    .replace(/\b(a|an|the)\b/gi, " ")
-    .replace(/\b(her|his|their|she|he|they|it)\b/gi, " ")
-    .replace(/\b(is|are|was|were|be|being|been|having)\b/gi, " ")
-    .replace(/\b(with|and|of|from|to|that|on|in|at|by|for|into|over|under|below|above)\b/gi, "，")
-    .replace(/[,:;]+/g, "，")
-    .replace(/，\s*，+/g, "，")
-    .replace(/\s*，\s*/g, "，")
-    .replace(/\s+/g, " ")
-    .replace(/^，+|，+$/g, "")
-    .trim();
-
-  output = output.replace(/__FLAG_(\d+)__/g, (_, index) => protectedFlags[Number(index)] || "");
-  output = stripResidualEnglish(output);
-
-  return output
-    .replace(/\b(stands?|appears?)\b/gi, "")
-    .replace(/\s+/g, " ")
-    .replace(/，{2,}/g, "，")
-    .replace(/^，+|，+$/g, "")
-    .trim();
-}
-
-function getLocalizedPhraseReplacements() {
-  return [
-    ["with form from a side angle with focus on her torso and upper body", "侧面视角，重点展示躯干与上半身"],
-    ["lighting highlighting metallic sheen of her armor and intricate details of her mechanical components", "光照突出装甲的金属光泽与机械部件的复杂细节"],
-    ["lighting highlights contours and metallic surfaces of her armor", "光照突出装甲轮廓与金属表面"],
-    ["character's outfit includes", "角色服装包含"],
-    ["character outfit includes", "角色服装包含"],
-    ["character is against a dark background", "背景为深色背景"],
-    ["set against a dark background", "背景为深色背景"],
-    ["set against a soft light blue background", "背景为柔和浅蓝背景"],
-    ["with focus on her torso and upper body", "重点展示躯干与上半身"],
-    ["focus on her torso and upper body", "重点展示躯干与上半身"],
-    ["focus on torso and upper body", "重点展示躯干与上半身"],
-    ["side-angle upper-body portrait", "侧角度上半身人像"],
-    ["upper-body three-quarter portrait", "上半身四分之三侧身人像"],
-    ["upper-body bust portrait", "上半身胸像人像"],
-    ["upper-body portrait", "上半身人像"],
-    ["three-quarter side profile", "四分之三侧面视角"],
-    ["close-up portrait view", "近景人像视角"],
-    ["close-up portrait", "近景人像特写"],
-    ["centered object composition", "主体居中构图"],
-    ["clean industrial composition", "干净的工业场景构图"],
-    ["clean architectural composition", "干净的建筑构图"],
-    ["balanced interior composition", "平衡的室内构图"],
-    ["wide scenic composition", "宽幅风景构图"],
-    ["clean poster composition", "干净的海报构图"],
-    ["clean composition", "干净构图"],
-    ["clean studio background", "干净的纯色背景"],
-    ["clean geometric forms", "干净的几何造型"],
-    ["industrial scene", "工业场景"],
-    ["architectural visualization", "建筑可视化效果"],
-    ["graphic design composition", "平面设计式构图"],
-    ["cyberpunk aesthetic", "赛博朋克美学"],
-    ["sci-fi character design", "科幻角色设计"],
-    ["mecha-inspired armor design", "机甲感装甲设计"],
-    ["cybernetic body details", "义体机械细节"],
-    ["cybernetic enhancements", "义体强化细节"],
-    ["doll-like 3D render", "人偶感3D渲染"],
-    ["anime-inspired 3D render", "动漫感3D渲染"],
-    ["stylized 3D render", "风格化3D渲染"],
-    ["clean CGI render", "干净的CGI渲染"],
-    ["realistic CGI", "写实CGI"],
-    ["realistic rendering", "写实渲染"],
-    ["3D rendered", "3D渲染"],
-    ["3D rendering", "3D渲染"],
-    ["3D render", "3D渲染"],
-    ["CGI render", "CGI渲染"],
-    ["cool-toned palette", "冷色调配色"],
-    ["soft light blue background", "柔和浅蓝背景"],
-    ["light blue background", "浅蓝色背景"],
-    ["dark background", "深色背景"],
-    ["soft clean surfaces", "干净平滑的表面"],
-    ["smooth clean surfaces", "平滑干净的表面"],
-    ["matte fabric texture", "哑光布料质感"],
-    ["soft global illumination", "柔和全局光照"],
-    ["rich material detail", "丰富材质细节"],
-    ["crisp render quality", "清晰渲染质感"],
-    ["polished stylization", "精修风格化处理"],
-    ["refined lighting", "精致光照"],
-    ["cinematic composition", "电影感构图"],
-    ["cute character styling", "可爱角色风格"],
-    ["doll-like character", "人偶感角色"],
-    ["high-tech bodysuit", "高科技紧身战衣"],
-    ["a high-tech bodysuit", "高科技紧身战衣"],
-    ["yellow and black armored bodysuit", "黄黑配色装甲式紧身战衣"],
-    ["high-tech suit", "高科技战衣"],
-    ["exposed mechanical arm", "外露机械手臂"],
-    ["intricate mechanical detailing", "复杂机械细节"],
-    ["intricate mechanical details", "复杂机械细节"],
-    ["intricate details", "复杂细节"],
-    ["intricate designs", "复杂设计细节"],
-    ["glowing elements", "发光元素"],
-    ["advanced technology", "先进科技感"],
-    ["suggesting movement", "带有运动感"],
-    ["reflective surfaces", "反光表面"],
-    ["dramatic mood", "戏剧化氛围"],
-    ["highlights contours", "突出轮廓"],
-    ["readiness", "蓄势待发感"],
-    ["action", "动作张力"],
-    ["sleek black mask covering her face", "覆盖面部的流线型黑色面罩"],
-    ["sleek black mask", "流线型黑色面罩"],
-    ["high-tech mask", "高科技面罩"],
-    ["futuristic mask", "未来感面罩"],
-    ["futuristic design", "未来感设计"],
-    ["yellow and black color scheme", "黄黑配色"],
-    ["black and yellow color scheme", "黑黄配色"],
-    ["female cyborg", "女性义体人"],
-    ["mechanical arm", "机械手臂"],
-    ["robotic armor", "机械装甲"],
-    ["white hoodie", "白色连帽衫"],
-    ["white hair", "白发"],
-    ["blue eyes", "蓝眼睛"],
-    ["pink cheeks", "粉色脸颊"],
-    ["pink blush", "粉色腮红"],
-    ["orbiting Earth at night", "在夜晚环绕地球运行"],
-    ["solar panels", "太阳能板"],
-    ["container ship", "集装箱货轮"],
-    ["satellite", "卫星"],
-    ["crane", "起重机"],
-    ["building", "建筑"],
-    ["port", "港口"],
-    ["high detail", "高细节"],
-    ["highly detailed", "高细节"],
-    ["ultra detailed", "超高细节"],
-    ["best quality", "高质量"],
-    ["masterpiece", "杰作级质感"],
-    ["precise forms", "精准造型"],
-    ["soft lighting", "柔和打光"],
-    ["dramatic lighting", "戏剧化光照"],
-    ["dynamic pose", "动态姿态"],
-    ["metallic sheen", "金属光泽"],
-    ["mechanical components", "机械部件"],
-    ["deep space background", "深空背景"]
-  ];
-}
-
-function getLocalizedWordReplacements() {
-  return [
-    ["illustration", "插画"],
-    ["cyberpunk", "赛博朋克"],
-    ["sci-fi", "科幻"],
-    ["futuristic", "未来感"],
-    ["high-tech", "高科技"],
-    ["design", "设计"],
-    ["yellow", "黄色"],
-    ["black", "黑色"],
-    ["mask", "面罩"],
-    ["armor", "装甲"],
-    ["armored", "装甲式"],
-    ["suit", "战衣"],
-    ["bodysuit", "紧身战衣"],
-    ["torso", "躯干"],
-    ["upper body", "上半身"],
-    ["lighting", "光照"],
-    ["highlighting", "突出"],
-    ["highlight", "突出"],
-    ["form", "轮廓"],
-    ["attire", "服装"],
-    ["pose", "姿态"],
-    ["dynamic", "动态"],
-    ["strength", "力量感"],
-    ["agility", "敏捷感"],
-    ["face", "面部"],
-    ["body", "身体"],
-    ["components", "部件"],
-    ["textures", "纹理"],
-    ["texture", "纹理"],
-    ["patterns", "纹样"],
-    ["smooth", "平滑"],
-    ["glossy", "光泽"],
-    ["dramatic", "戏剧化"],
-    ["soft", "柔和"],
-    ["clean", "干净"],
-    ["cyborg", "义体人"],
-    ["female", "女性"],
-    ["character", "角色"],
-    ["outfit", "服装"],
-    ["includes", "包含"],
-    ["mood", "氛围"],
-    ["color scheme", "配色"],
-    ["focus", "聚焦"],
-    ["realistic", "写实"],
-    ["vehicle", "交通工具"],
-    ["portrait", "人像"],
-    ["background", "背景"],
-    ["cool tones", "冷色调"],
-    ["wearing", "穿着"],
-    ["exposed", "外露"],
-    ["sleek", "流线型"],
-    ["blurry", "模糊"],
-    ["blurred", "模糊"],
-    ["low quality", "低质量"],
-    ["bad anatomy", "结构错误"],
-    ["extra fingers", "多余手指"],
-    ["distorted face", "脸部畸形"],
-    ["warped geometry", "几何结构扭曲"],
-    ["broken perspective", "透视错误"],
-    ["messy composition", "构图杂乱"],
-    ["low detail", "细节不足"]
-  ];
-}
-
-function applyLocalizedReplacements(text, replacements) {
-  let output = String(text || "");
-  for (const [from, to] of replacements.sort((a, b) => b[0].length - a[0].length)) {
-    output = output.replace(new RegExp(escapeRegExp(from), "gi"), to);
-  }
-  return output;
-}
-
-function applyLocalizedWordReplacements(text, replacements) {
-  let output = String(text || "");
-  for (const [from, to] of replacements.sort((a, b) => b[0].length - a[0].length)) {
-    output = output.replace(new RegExp(`\\b${escapeRegExp(from)}\\b`, "gi"), to);
-  }
-  return output;
-}
-
-function stripResidualEnglish(text) {
-  const whitelist = new Set(["CGI", "3D", "SDXL", "Flux", "Midjourney", "MJ"]);
-
-  return String(text || "").replace(/\b[a-zA-Z][a-zA-Z'-]*\b/g, (word) => {
-    const normalized = word.replace(/[^a-zA-Z]/g, "");
-    if (!normalized) {
-      return "";
-    }
-    for (const allowed of whitelist) {
-      if (normalized.toLowerCase() === allowed.toLowerCase()) {
-        return allowed;
-      }
-    }
-    return "";
-  });
-}
-
-function pickCleanerLocalizedBundle(primaryBundle, fallbackBundle) {
-  return englishContaminationScore(primaryBundle) <= englishContaminationScore(fallbackBundle)
-    ? primaryBundle
-    : fallbackBundle;
-}
-
-function englishContaminationScore(bundle) {
+function bundleHasJsonLeak(bundle) {
   const texts = [
     bundle.localizedPromptModes?.concise,
     bundle.localizedPromptModes?.detailed,
     bundle.localizedPromptModes?.pro,
+    bundle.localizedPromptVariants?.concise?.general,
+    bundle.localizedPromptVariants?.concise?.midjourney,
+    bundle.localizedPromptVariants?.concise?.sdxl,
+    bundle.localizedPromptVariants?.concise?.flux,
+    bundle.localizedPromptVariants?.detailed?.general,
+    bundle.localizedPromptVariants?.detailed?.midjourney,
+    bundle.localizedPromptVariants?.detailed?.sdxl,
+    bundle.localizedPromptVariants?.detailed?.flux,
+    bundle.localizedPromptVariants?.pro?.general,
+    bundle.localizedPromptVariants?.pro?.midjourney,
+    bundle.localizedPromptVariants?.pro?.sdxl,
+    bundle.localizedPromptVariants?.pro?.flux,
     bundle.localizedNegativePrompt
-  ]
-    .map((item) => String(item || ""))
-    .join(" ");
+  ];
 
-  const englishWords = texts.match(/\b[a-zA-Z]{2,}\b/g) || [];
-  return englishWords.length;
+  return texts.some((item) => /```|\bjson\b|"\s*(promptModes|promptVariants|negativePrompt|prompt|detailedPrompt)\s*"/i.test(String(item || "")));
+}
+
+function bundleLooksTranslated(bundle) {
+  return bundleHasChinese(bundle) && !bundleHasJsonLeak(bundle) && !bundleEnglishResidualWords(bundle).length;
+}
+
+function bundleEnglishResidualWords(bundle) {
+  const texts = [
+    bundle.localizedPromptModes?.concise,
+    bundle.localizedPromptModes?.detailed,
+    bundle.localizedPromptModes?.pro,
+    bundle.localizedPromptVariants?.concise?.general,
+    bundle.localizedPromptVariants?.concise?.midjourney,
+    bundle.localizedPromptVariants?.concise?.sdxl,
+    bundle.localizedPromptVariants?.concise?.flux,
+    bundle.localizedPromptVariants?.detailed?.general,
+    bundle.localizedPromptVariants?.detailed?.midjourney,
+    bundle.localizedPromptVariants?.detailed?.sdxl,
+    bundle.localizedPromptVariants?.detailed?.flux,
+    bundle.localizedPromptVariants?.pro?.general,
+    bundle.localizedPromptVariants?.pro?.midjourney,
+    bundle.localizedPromptVariants?.pro?.sdxl,
+    bundle.localizedPromptVariants?.pro?.flux,
+    bundle.localizedNegativePrompt
+  ];
+
+  return dedupeStrings(texts.flatMap((item) => getOrdinaryEnglishWords(item)));
+}
+
+function cleanTranslatedPromptBundle(translated, promptModes, promptVariants, negativePrompt) {
+  const translatedModes = translated.promptModes || {};
+  const localizedPromptModes = {
+    concise: cleanTranslatedPromptText(translatedModes.concise || translatedModes.detailed || translatedModes.pro || promptModes.concise || ""),
+    detailed: cleanTranslatedPromptText(
+      translatedModes.detailed ||
+        translatedModes.pro ||
+        translatedModes.concise ||
+        promptModes.detailed ||
+        promptModes.concise ||
+        ""
+    ),
+    pro: cleanTranslatedPromptText(
+      translatedModes.pro ||
+        translatedModes.detailed ||
+        translatedModes.concise ||
+        promptModes.pro ||
+        promptModes.detailed ||
+        promptModes.concise ||
+        ""
+    )
+  };
+
+  return {
+    localizedPromptModes,
+    localizedPromptVariants: {
+      concise: cleanTranslatedVariantRow(translated.promptVariants?.concise, localizedPromptModes.concise),
+      detailed: cleanTranslatedVariantRow(translated.promptVariants?.detailed, localizedPromptModes.detailed),
+      pro: cleanTranslatedVariantRow(translated.promptVariants?.pro, localizedPromptModes.pro)
+    },
+    localizedNegativePrompt: cleanTranslatedPromptText(translated.negativePrompt || negativePrompt || "")
+  };
+}
+
+function cleanTranslatedVariantRow(translatedRow, fallbackText) {
+  const fallback = cleanTranslatedPromptText(fallbackText || "");
+  return {
+    general: cleanTranslatedPromptText(translatedRow?.general || fallback),
+    midjourney: cleanTranslatedPromptText(translatedRow?.midjourney || fallback),
+    sdxl: cleanTranslatedPromptText(translatedRow?.sdxl || fallback),
+    flux: cleanTranslatedPromptText(translatedRow?.flux || fallback)
+  };
+}
+
+function cleanTranslatedPromptText(text) {
+  const unwrapped = unwrapPromptJsonLeak(String(text || "").trim());
+  return unwrapped
+    .replace(/```json|```/gi, "")
+    .replace(/\bCGI\b/gi, "计算机生成图像")
+    .replace(/(^|[^A-Za-z])CG(?=$|[^A-Za-z])/g, "$1计算机图形")
+    .replace(/\bAI\b/gi, "人工智能")
+    .replace(/\bUI\b/gi, "用户界面")
+    .replace(/\bUX\b/gi, "用户体验")
+    .replace(/\s+/g, " ")
+    .replace(/\s*([，。；、])\s*/g, "$1")
+    .trim();
+}
+
+function validateTranslatedBundleFidelity(bundle, promptModes, promptVariants, negativePrompt) {
+  const issues = [];
+  validateTranslatedField(issues, "promptModes.concise", bundle.localizedPromptModes?.concise, promptModes?.concise);
+  validateTranslatedField(issues, "promptModes.detailed", bundle.localizedPromptModes?.detailed, promptModes?.detailed || promptModes?.concise);
+  validateTranslatedField(issues, "promptModes.pro", bundle.localizedPromptModes?.pro, promptModes?.pro || promptModes?.detailed || promptModes?.concise);
+  validateTranslatedVariantRow(issues, "promptVariants.concise", bundle.localizedPromptVariants?.concise, promptVariants?.concise);
+  validateTranslatedVariantRow(issues, "promptVariants.detailed", bundle.localizedPromptVariants?.detailed, promptVariants?.detailed);
+  validateTranslatedVariantRow(issues, "promptVariants.pro", bundle.localizedPromptVariants?.pro, promptVariants?.pro);
+  validateTranslatedField(issues, "negativePrompt", bundle.localizedNegativePrompt, negativePrompt);
+
+  if (!bundleHasChinese(bundle)) {
+    issues.push("No Simplified Chinese text was returned.");
+  }
+
+  if (bundleHasJsonLeak(bundle)) {
+    issues.push("Output contains JSON/code-fence leakage.");
+  }
+
+  return {
+    ok: issues.length === 0,
+    issues: dedupeStrings(issues).slice(0, 24)
+  };
+}
+
+function validateTranslatedVariantRow(issues, pathPrefix, localizedRow, sourceRow) {
+  validateTranslatedField(issues, `${pathPrefix}.general`, localizedRow?.general, sourceRow?.general);
+  validateTranslatedField(issues, `${pathPrefix}.midjourney`, localizedRow?.midjourney, sourceRow?.midjourney);
+  validateTranslatedField(issues, `${pathPrefix}.sdxl`, localizedRow?.sdxl, sourceRow?.sdxl);
+  validateTranslatedField(issues, `${pathPrefix}.flux`, localizedRow?.flux, sourceRow?.flux);
+}
+
+function validateTranslatedField(issues, pathName, localizedText, sourceText) {
+  const source = String(sourceText || "").trim();
+  if (!source) {
+    return;
+  }
+
+  const localized = String(localizedText || "").trim();
+  if (!localized) {
+    issues.push(`${pathName}: empty translation.`);
+    return;
+  }
+
+  if (/```|\bjson\b|"\s*(promptModes|promptVariants|negativePrompt|prompt|detailedPrompt)\s*"/i.test(localized)) {
+    issues.push(`${pathName}: contains JSON/code-fence leakage.`);
+  }
+
+  const englishWords = getOrdinaryEnglishWords(localized);
+  if (englishWords.length) {
+    issues.push(`${pathName}: contains untranslated English words: ${englishWords.slice(0, 8).join(", ")}.`);
+  }
+
+  const missingTerms = collectRequiredTranslationTerms(source).filter(
+    (term) => !term.zh.some((zhText) => localized.includes(zhText))
+  );
+  if (missingTerms.length) {
+    issues.push(
+      `${pathName}: missing source terms: ${missingTerms
+        .map((term) => `${term.en}->${term.zh.join("/")}`)
+        .slice(0, 8)
+        .join(", ")}.`
+    );
+  }
+}
+
+function getOrdinaryEnglishWords(text) {
+  const whitelist = new Set(["3D", "SDXL", "Flux", "Midjourney", "MJ"]);
+  const sourceWithoutFlags = String(text || "").replace(/--[a-zA-Z0-9:-]+(?:\s+[a-zA-Z0-9:./-]+)?/g, " ");
+  const matches = sourceWithoutFlags.match(/\b[a-zA-Z][a-zA-Z'-]*\b/g) || [];
+  return dedupeStrings(
+    matches.filter((word) => {
+      const normalized = word.replace(/[^a-zA-Z]/g, "");
+      if (!normalized) {
+        return false;
+      }
+      if (/^FLAG_\d+$/i.test(normalized)) {
+        return false;
+      }
+      return !Array.from(whitelist).some((allowed) => normalized.toLowerCase() === allowed.toLowerCase());
+    })
+  );
+}
+
+function collectRequiredTranslationTermsFromBundle(promptModes, promptVariants, negativePrompt) {
+  const texts = [
+    promptModes?.concise,
+    promptModes?.detailed,
+    promptModes?.pro,
+    promptVariants?.concise?.general,
+    promptVariants?.concise?.midjourney,
+    promptVariants?.concise?.sdxl,
+    promptVariants?.concise?.flux,
+    promptVariants?.detailed?.general,
+    promptVariants?.detailed?.midjourney,
+    promptVariants?.detailed?.sdxl,
+    promptVariants?.detailed?.flux,
+    promptVariants?.pro?.general,
+    promptVariants?.pro?.midjourney,
+    promptVariants?.pro?.sdxl,
+    promptVariants?.pro?.flux,
+    negativePrompt
+  ];
+
+  return collectRequiredTranslationTerms(texts.join(" "));
+}
+
+function collectRequiredTranslationTerms(text) {
+  const source = String(text || "");
+  const terms = getRequiredTranslationTermMap()
+    .filter((term) => term.pattern.test(source))
+    .map((term) => ({ en: term.en, zh: term.zh }));
+  return dedupeTranslationTerms(terms);
+}
+
+function dedupeTranslationTerms(terms) {
+  const seen = new Set();
+  const result = [];
+  for (const term of terms) {
+    const key = term.zh[0];
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(term);
+  }
+  return result;
+}
+
+function getRequiredTranslationTermMap() {
+  return [
+    { en: "container ship", pattern: /\b(container ship|cargo ship)\b/i, zh: ["集装箱货轮", "货轮", "集装箱船"] },
+    { en: "airplane", pattern: /\b(airplane|plane|aircraft|jet)\b/i, zh: ["飞机"] },
+    { en: "truck", pattern: /\btruck(s)?\b/i, zh: ["卡车", "货车"] },
+    { en: "ship", pattern: /\b(ship|boat|vessel)\b/i, zh: ["船", "轮船", "货轮"] },
+    { en: "container", pattern: /\bcontainer(s)?\b/i, zh: ["集装箱"] },
+    { en: "box", pattern: /\bbox(es)?\b/i, zh: ["箱子", "货箱"] },
+    { en: "logistics", pattern: /\blogistics\b/i, zh: ["物流"] },
+    { en: "port", pattern: /\b(port|harbor|dock(?:ed)?)\b/i, zh: ["港口", "码头"] },
+    { en: "crane", pattern: /\bcrane(s)?\b/i, zh: ["起重机", "吊机"] },
+    { en: "building", pattern: /\bbuilding(s)?\b/i, zh: ["建筑", "大楼"] },
+    { en: "warehouse", pattern: /\bwarehouse(s)?\b/i, zh: ["仓库"] },
+    { en: "platform", pattern: /\bplatform(s)?\b/i, zh: ["平台"] },
+    { en: "satellite", pattern: /\bsatellite(s)?\b/i, zh: ["卫星"] },
+    { en: "solar panels", pattern: /\bsolar panel(s)?\b/i, zh: ["太阳能板"] },
+    { en: "Earth", pattern: /\bEarth\b/i, zh: ["地球"] },
+    { en: "planet", pattern: /\bplanet(ary)?\b/i, zh: ["星球"] },
+    { en: "cloud icon", pattern: /\bcloud icon\b/i, zh: ["云朵图标"] },
+    { en: "cloud", pattern: /\bcloud\b/i, zh: ["云朵"] },
+    { en: "bar chart", pattern: /\bbar chart(s)?\b/i, zh: ["柱状图"] },
+    { en: "pie chart", pattern: /\bpie chart(s)?\b/i, zh: ["饼图"] },
+    { en: "dashboard", pattern: /\bdashboard(s)?\b/i, zh: ["数据看板", "看板"] },
+    { en: "tablet", pattern: /\btablet(s)?\b/i, zh: ["平板"] },
+    { en: "screen", pattern: /\bscreen(s)?\b/i, zh: ["屏幕"] },
+    { en: "interface", pattern: /\binterface(s)?\b/i, zh: ["界面"] },
+    { en: "female cyborg", pattern: /\bfemale cyborg\b/i, zh: ["女性义体人"] },
+    { en: "mechanical arm", pattern: /\bmechanical arm(s)?\b/i, zh: ["机械手臂"] },
+    { en: "mask", pattern: /\bmask(s)?\b/i, zh: ["面罩"] },
+    { en: "armor", pattern: /\barmor|armour\b/i, zh: ["装甲"] },
+    { en: "white hair", pattern: /\bwhite hair\b/i, zh: ["白发"] },
+    { en: "blue eyes", pattern: /\bblue eyes\b/i, zh: ["蓝眼睛"] },
+    { en: "white hoodie", pattern: /\bwhite hoodie\b/i, zh: ["白色连帽衫"] }
+  ];
+}
+
+function unwrapPromptJsonLeak(text) {
+  const raw = stripCodeFence(String(text || "").trim());
+  if (!raw || !/[{[]|```|\bjson\b/i.test(raw)) {
+    return raw;
+  }
+
+  const parsed = parseModelJson(raw);
+  if (parsed) {
+    return String(
+      parsed.proPrompt ||
+        parsed.detailedPrompt ||
+        parsed.prompt ||
+        parsed.concisePrompt ||
+        parsed.promptModes?.pro ||
+        parsed.promptModes?.detailed ||
+        parsed.promptModes?.concise ||
+        parsed.promptVariants?.pro?.general ||
+        parsed.promptVariants?.detailed?.general ||
+        parsed.promptVariants?.concise?.general ||
+        raw
+    );
+  }
+
+  return raw.replace(/```json|```/gi, "").replace(/^\s*json\s*/i, "").trim();
 }
 
 function escapeRegExp(text) {
@@ -2982,261 +2566,4 @@ function badRequest(message) {
 function parsePositiveInt(value, fallback) {
   const parsed = Number.parseInt(String(value || ""), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function fallbackTranslatePromptText(text) {
-  const source = String(text || "").trim();
-  if (!source) {
-    return "";
-  }
-
-  const sceneTemplate = buildLocalizedSceneTemplateFromEnglish(source);
-  if (sceneTemplate) {
-    return sceneTemplate;
-  }
-
-  const protectedFlags = [];
-  let output = source.replace(/--[a-zA-Z0-9:-]+(?:\s+[a-zA-Z0-9:./-]+)?/g, (match) => {
-    const token = `__FLAG_${protectedFlags.length}__`;
-    protectedFlags.push(match);
-    return token;
-  });
-
-  output = applyLocalizedReplacements(output, getLocalizedPhraseReplacements());
-  output = applyLocalizedWordReplacements(output, getLocalizedWordReplacements());
-  output = output.replace(/__FLAG_(\d+)__/g, (_, index) => protectedFlags[Number(index)] || "");
-
-  return normalizeLocalizedPromptText(output);
-}
-
-function normalizeLocalizedPromptText(text) {
-  let output = String(text || "").trim();
-  if (!output) {
-    return "";
-  }
-
-  const protectedFlags = [];
-  output = output.replace(/--[a-zA-Z0-9:-]+(?:\s+[a-zA-Z0-9:./-]+)?/g, (match) => {
-    const token = `__FLAG_${protectedFlags.length}__`;
-    protectedFlags.push(match);
-    return token;
-  });
-
-  output = applyLocalizedReplacements(output, getLocalizedPhraseReplacements());
-  output = applyLocalizedWordReplacements(output, getLocalizedWordReplacements());
-
-  output = output
-    .replace(/['"`]/g, " ")
-    .replace(/\b(a|an|the)\b/gi, " ")
-    .replace(/\b(her|his|their|she|he|they|it)\b/gi, " ")
-    .replace(/\b(is|are|was|were|be|being|been|having|with|and|of|from|to|that|on|in|at|by|for|into|over|under|below|above)\b/gi, "，")
-    .replace(/[,:;]+/g, "，")
-    .replace(/，\s*，+/g, "，")
-    .replace(/\s*，\s*/g, "，")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  output = output.replace(/__FLAG_(\d+)__/g, (_, index) => protectedFlags[Number(index)] || "");
-  output = stripResidualEnglish(output);
-
-  return output
-    .replace(/，，+/g, "，")
-    .replace(/，(3D|CGI)/g, "，$1")
-    .replace(/(^|，)\s*(高科技|未来感|流线型)\s*(，\s*\1)?/g, "$1$2，")
-    .replace(/(，\s*){2,}/g, "，")
-    .replace(/^，+|，+$/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function getLocalizedPhraseReplacements() {
-  return [
-    ["cloud computing concept", "云计算概念展示"],
-    ["data visualization elements", "数据可视化元素"],
-    ["dashboard interface display", "数据看板界面展示"],
-    ["minimal product showcase", "极简产品展示风格"],
-    ["minimal product showcase environment", "极简科技产品展示环境"],
-    ["clean layered tech platform", "层叠式科技平台底座"],
-    ["blue and white palette", "蓝白配色"],
-    ["cool-toned palette", "冷色调配色"],
-    ["soft ambient lighting", "柔和环境光"],
-    ["soft global illumination", "柔和全局光照"],
-    ["clean CGI render", "干净的 CGI 渲染"],
-    ["clean product-style presentation", "产品展示式构图"],
-    ["centered object composition", "主体居中构图"],
-    ["clean industrial composition", "干净的工业场景构图"],
-    ["clean architectural composition", "干净的建筑构图"],
-    ["balanced interior composition", "平衡的室内构图"],
-    ["wide scenic composition", "宽幅风景构图"],
-    ["clean poster composition", "干净的海报构图"],
-    ["clean composition", "干净构图"],
-    ["clean studio background", "干净的纯色背景"],
-    ["clean geometric forms", "干净的几何造型"],
-    ["soft clean surfaces", "干净平滑的表面"],
-    ["smooth clean surfaces", "平滑干净的表面"],
-    ["graphic design composition", "平面设计式构图"],
-    ["architectural visualization", "建筑可视化效果"],
-    ["industrial scene", "工业场景"],
-    ["realistic CGI", "写实 CGI"],
-    ["realistic rendering", "写实渲染"],
-    ["stylized 3D render", "风格化 3D 渲染"],
-    ["doll-like 3D render", "人偶感 3D 渲染"],
-    ["anime-inspired 3D render", "动漫感 3D 渲染"],
-    ["3D rendered", "3D 渲染"],
-    ["3D rendering", "3D 渲染"],
-    ["3D render", "3D 渲染"],
-    ["CGI render", "CGI 渲染"],
-    ["satellite with solar panels orbiting Earth at night", "带有太阳能板的卫星在夜晚环绕地球"],
-    ["orbiting Earth at night", "在夜晚环绕地球"],
-    ["deep space background", "深空背景"],
-    ["glowing planetary curvature below", "下方可见发光的地球弧面"],
-    ["cloud icon", "云朵图标"],
-    ["bar chart", "柱状图"],
-    ["pie chart", "饼图"],
-    ["dashboard", "数据看板"],
-    ["analytics dashboard", "分析看板"],
-    ["data visualization", "数据可视化"],
-    ["tablet screen", "平板屏幕"],
-    ["screen", "屏幕"],
-    ["interface", "界面"],
-    ["platform", "平台底座"],
-    ["high detail", "高细节"],
-    ["highly detailed", "高细节"],
-    ["ultra detailed", "超高细节"],
-    ["best quality", "高质量"],
-    ["crisp render quality", "清晰渲染质感"],
-    ["precise forms", "精准造型"],
-    ["rich material detail", "丰富材质细节"],
-    ["polished stylization", "精修风格化处理"],
-    ["refined lighting", "精致光照"],
-    ["cinematic composition", "电影感构图"],
-    ["soft lighting", "柔和打光"],
-    ["dramatic lighting", "戏剧化光照"],
-    ["cyberpunk aesthetic", "赛博朋克美学"],
-    ["sci-fi character design", "科幻角色设计"],
-    ["mecha-inspired armor design", "机甲感装甲设计"],
-    ["cybernetic body details", "义体机械细节"],
-    ["cybernetic enhancements", "义体强化细节"],
-    ["female cyborg", "女性义体人"],
-    ["mechanical arm", "机械手臂"],
-    ["robotic armor", "机械装甲"],
-    ["futuristic mask", "未来感面罩"],
-    ["high-tech suit", "高科技战衣"],
-    ["white hoodie", "白色连帽衫"],
-    ["white hair", "白发"],
-    ["blue eyes", "蓝眼睛"],
-    ["pink cheeks", "粉色脸颊"],
-    ["pink blush", "粉色腮红"],
-    ["light blue background", "浅蓝色背景"],
-    ["soft light blue background", "柔和浅蓝背景"]
-  ];
-}
-
-function getLocalizedWordReplacements() {
-  return [
-    ["cyberpunk", "赛博朋克"],
-    ["sci-fi", "科幻"],
-    ["futuristic", "未来感"],
-    ["high-tech", "高科技"],
-    ["cloud", "云朵"],
-    ["dashboard", "看板"],
-    ["analytics", "分析"],
-    ["data", "数据"],
-    ["visualization", "可视化"],
-    ["chart", "图表"],
-    ["graph", "图表"],
-    ["tablet", "平板"],
-    ["screen", "屏幕"],
-    ["interface", "界面"],
-    ["platform", "平台"],
-    ["design", "设计"],
-    ["yellow", "黄色"],
-    ["black", "黑色"],
-    ["mask", "面罩"],
-    ["armor", "装甲"],
-    ["armored", "装甲式"],
-    ["suit", "战衣"],
-    ["bodysuit", "紧身战衣"],
-    ["wearing", "穿着"],
-    ["exposed", "外露"],
-    ["sleek", "流线型"],
-    ["torso", "躯干"],
-    ["upper body", "上半身"],
-    ["lighting", "光照"],
-    ["highlighting", "突出"],
-    ["highlight", "突出"],
-    ["form", "轮廓"],
-    ["attire", "服装"],
-    ["outfit", "服装"],
-    ["includes", "包含"],
-    ["mood", "氛围"],
-    ["pose", "姿态"],
-    ["dynamic", "动态"],
-    ["smooth", "平滑"],
-    ["glossy", "光泽"],
-    ["dramatic", "戏剧化"],
-    ["soft", "柔和"],
-    ["clean", "干净"],
-    ["realistic", "写实"],
-    ["portrait", "人像"],
-    ["background", "背景"],
-    ["cool tones", "冷色调"],
-    ["character", "角色"],
-    ["female", "女性"],
-    ["cyborg", "义体人"],
-    ["satellite", "卫星"],
-    ["solar panels", "太阳能板"],
-    ["container ship", "集装箱货轮"],
-    ["port", "港口"],
-    ["crane", "起重机"],
-    ["building", "建筑"],
-    ["blurry", "模糊"],
-    ["blurred", "模糊"],
-    ["low quality", "低质量"],
-    ["bad anatomy", "结构错误"],
-    ["extra fingers", "多余手指"],
-    ["distorted face", "脸部畸形"],
-    ["warped geometry", "几何结构扭曲"],
-    ["broken perspective", "透视错误"],
-    ["messy composition", "构图杂乱"],
-    ["low detail", "细节不足"]
-  ];
-}
-
-function buildLocalizedSceneTemplateFromEnglish(text) {
-  const lower = String(text || "").toLowerCase();
-
-  if (
-    /\b(cloud|dashboard|analytics|data visualization|bar chart|pie chart|chart|graph|tablet|screen|interface|platform)\b/.test(
-      lower
-    )
-  ) {
-    const parts = [];
-    if (/\b(blue and white|cool tones|cool-toned)\b/.test(lower)) {
-      parts.push("蓝白配色");
-    }
-    parts.push("未来科技 3D 场景");
-    if (/\bcloud\b/.test(lower)) {
-      parts.push("中心为云计算图标");
-    }
-    if (/\b(bar chart|chart|graph)\b/.test(lower)) {
-      parts.push("带有柱状图与图表面板");
-    }
-    if (/\bpie chart\b/.test(lower)) {
-      parts.push("配有饼图组件");
-    }
-    if (/\b(tablet|screen|dashboard|interface)\b/.test(lower)) {
-      parts.push("包含数据看板屏幕");
-    }
-    parts.push("层叠式科技平台底座");
-    parts.push("半透明与平滑材质");
-    parts.push("柔和冷色环境光");
-    parts.push("极简产品展示风格");
-    parts.push("主体居中构图");
-    parts.push("干净明亮的高科技环境");
-    parts.push("高细节");
-    return dedupeStrings(parts).join("，");
-  }
-
-  return "";
 }

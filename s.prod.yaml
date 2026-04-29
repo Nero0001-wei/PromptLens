@@ -18,7 +18,7 @@ resources:
       runtime: nodejs20
       code: ./backend
       memorySize: 512
-      timeout: 60
+      timeout: 120
       cpu: 0.5
       diskSize: 512
       environmentVariables:
