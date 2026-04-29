@@ -19,11 +19,12 @@ const MAX_UPLOAD_EDGE = 2048;
 const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
 const MIN_WINDOW_HEIGHT = 360;
 const MAX_WINDOW_HEIGHT = 980;
+const DEFAULT_MODE_KEY = "detailed";
 
 let currentImageState = null;
 let currentResult = null;
 let currentVariantKey = "general";
-let currentModeKey = "concise";
+let currentModeKey = DEFAULT_MODE_KEY;
 let currentLanguage = "en";
 let previewObjectUrl = null;
 let isGenerating = false;
@@ -66,19 +67,31 @@ function bindEvents() {
   uploadBox.addEventListener("dragleave", onDragLeave);
   uploadBox.addEventListener("drop", onDropFile);
 
-  resultPanel.addEventListener("click", (event) => {
+  resultPanel.addEventListener("click", async (event) => {
     const modeButton = event.target.closest("[data-mode]");
     if (modeButton) {
+      const previousModeKey = currentModeKey;
       currentModeKey = modeButton.dataset.mode;
       renderModeButtons();
+      if (currentLanguage === "zh" && !(await ensureLocalizedCurrentPrompt())) {
+        currentModeKey = previousModeKey;
+        renderModeButtons();
+        return;
+      }
       renderResult(currentResult);
       return;
     }
 
     const variantButton = event.target.closest("[data-variant]");
     if (variantButton) {
+      const previousVariantKey = currentVariantKey;
       currentVariantKey = variantButton.dataset.variant;
       renderVariantButtons();
+      if (currentLanguage === "zh" && !(await ensureLocalizedCurrentPrompt())) {
+        currentVariantKey = previousVariantKey;
+        renderVariantButtons();
+        return;
+      }
       renderResult(currentResult);
     }
   });
@@ -205,7 +218,7 @@ async function useLocalFile(file) {
 function setCurrentImage(nextState) {
   currentImageState = nextState;
   currentResult = null;
-  currentModeKey = "concise";
+  currentModeKey = DEFAULT_MODE_KEY;
   currentVariantKey = "general";
   currentLanguage = "en";
   renderLanguageToggle();
@@ -236,7 +249,7 @@ function setCurrentImage(nextState) {
 function setIdleUploadState() {
   currentImageState = null;
   currentResult = null;
-  currentModeKey = "concise";
+  currentModeKey = DEFAULT_MODE_KEY;
   currentVariantKey = "general";
   currentLanguage = "en";
   renderLanguageToggle();
@@ -301,8 +314,7 @@ async function onGeneratePrompt() {
     currentResult.localizedPromptModes = null;
     currentResult.localizedPromptVariants = null;
     currentResult.localizedNegativePrompt = "";
-    currentResult.localizedBundleFresh = false;
-    currentModeKey = "concise";
+    currentModeKey = DEFAULT_MODE_KEY;
     currentVariantKey = "general";
     currentLanguage = "en";
     renderLanguageToggle();
@@ -326,8 +338,8 @@ async function onSelectLanguage(nextLanguage) {
   }
 
   if (nextLanguage === "zh") {
-    const hasLocalizedBundle = await ensureLocalizedBundle();
-    if (!hasLocalizedBundle) {
+    const hasLocalizedPrompt = await ensureLocalizedCurrentPrompt();
+    if (!hasLocalizedPrompt) {
       return;
     }
   }
@@ -405,24 +417,14 @@ function getCurrentPromptText() {
     return "";
   }
 
-  const variants =
-    currentLanguage === "zh"
-      ? normalizeVariants(currentResult.localizedPromptVariants || currentResult.promptVariants)
-      : normalizeVariants(currentResult.promptVariants);
-  const modes =
-    currentLanguage === "zh"
-      ? normalizeModes(currentResult.localizedPromptModes || currentResult.promptModes, currentResult.prompt)
-      : normalizeModes(currentResult.promptModes, currentResult.prompt);
+  if (currentLanguage === "zh") {
+    const localizedPrompt = getLocalizedCurrentPromptText();
+    if (localizedPrompt) {
+      return localizedPrompt;
+    }
+  }
 
-  const activeVariants = variants[currentModeKey] || variants.concise || variants.detailed || variants.pro || {};
-
-  return (
-    activeVariants[currentVariantKey] ||
-    activeVariants.general ||
-    modes[currentModeKey] ||
-    currentResult.prompt ||
-    ""
-  );
+  return getEnglishCurrentPromptText();
 }
 
 function getCurrentNegativeText() {
@@ -437,13 +439,55 @@ function getCurrentNegativeText() {
   return currentResult.negativePrompt || "";
 }
 
-async function ensureLocalizedBundle() {
+function getEnglishCurrentPromptText() {
+  if (!currentResult) {
+    return "";
+  }
+
+  const variants = normalizeVariants(currentResult.promptVariants);
+  const modes = normalizeModes(currentResult.promptModes, currentResult.prompt);
+  const activeVariants = variants[currentModeKey] || variants.detailed || variants.pro || {};
+
+  return (
+    activeVariants[currentVariantKey] ||
+    activeVariants.general ||
+    modes[currentModeKey] ||
+    modes.detailed ||
+    currentResult.prompt ||
+    ""
+  );
+}
+
+function getLocalizedCurrentPromptText(result = currentResult) {
+  if (!result) {
+    return "";
+  }
+
+  const variants = normalizeVariants(result.localizedPromptVariants || {});
+  const modes = normalizeModes(result.localizedPromptModes || {}, "");
+  const activeVariants = variants[currentModeKey] || {};
+
+  return (
+    activeVariants[currentVariantKey] ||
+    activeVariants.general ||
+    modes[currentModeKey] ||
+    ""
+  );
+}
+
+async function ensureLocalizedCurrentPrompt() {
   if (!currentResult) {
     return false;
   }
 
-  if (currentResult.localizedBundleFresh && hasUsableLocalizedBundle(currentResult)) {
+  if (hasUsableLocalizedCurrentPrompt(currentResult)) {
     return true;
+  }
+
+  const promptText = getEnglishCurrentPromptText();
+  if (!promptText) {
+    setStatus("当前没有可翻译的提示词。", "error");
+    return false;
   }
 
   const { backendBaseUrl, appToken } = await chrome.storage.sync.get(["backendBaseUrl", "appToken"]);
@@ -462,9 +506,10 @@ async function ensureLocalizedBundle() {
         ...(appToken ? { "X-App-Token": appToken } : {})
       },
       body: JSON.stringify({
-        promptModes: currentResult.promptModes || {},
-        promptVariants: currentResult.promptVariants || {},
-        negativePrompt: currentResult.negativePrompt || ""
+        promptText,
+        negativePrompt: currentResult.negativePrompt || "",
+        modeKey: currentModeKey,
+        variantKey: currentVariantKey
       })
     });
 
@@ -473,22 +518,32 @@ async function ensureLocalizedBundle() {
       throw new Error(translated.error || "中文翻译失败");
     }
 
-    currentResult.localizedPromptModes = translated.localizedPromptModes || null;
-    currentResult.localizedPromptVariants = translated.localizedPromptVariants || null;
-    currentResult.localizedNegativePrompt = translated.localizedNegativePrompt || "";
-    if (!hasUsableLocalizedBundle(currentResult)) {
+    setLocalizedCurrentPrompt(
+      translated.localizedPrompt || translated.prompt || "",
+      translated.localizedNegativePrompt || translated.negativePrompt || ""
+    );
+    if (!hasUsableLocalizedCurrentPrompt(currentResult)) {
       throw new Error("中文翻译结果不可用，请稍后重试");
     }
 
-    currentResult.localizedBundleFresh = true;
     clearStatus();
     return true;
   } catch (error) {
     console.error(error);
     setStatus(error.message || "中文翻译失败", "error");
-    currentResult.localizedBundleFresh = false;
     return false;
   }
+}
+
+function setLocalizedCurrentPrompt(localizedPrompt, localizedNegativePrompt) {
+  currentResult.localizedPromptModes = currentResult.localizedPromptModes || {};
+  currentResult.localizedPromptVariants = currentResult.localizedPromptVariants || {};
+  currentResult.localizedPromptVariants[currentModeKey] =
+    currentResult.localizedPromptVariants[currentModeKey] || {};
+
+  currentResult.localizedPromptModes[currentModeKey] = String(localizedPrompt || "").trim();
+  currentResult.localizedPromptVariants[currentModeKey][currentVariantKey] = String(localizedPrompt || "").trim();
+  currentResult.localizedNegativePrompt = String(localizedNegativePrompt || "").trim();
 }
 
 async function readJsonResponse(response, fallbackMessage) {
@@ -522,14 +577,13 @@ function normalizeHttpErrorMessage(text, fallbackMessage) {
   return value.slice(0, 180);
 }
 
-function hasUsableLocalizedBundle(result) {
-  const modes = result.localizedPromptModes;
-  const negative = result.localizedNegativePrompt;
+function hasUsableLocalizedCurrentPrompt(result) {
+  const localizedPrompt = getLocalizedCurrentPromptText(result);
+  const localizedNegative = result.localizedNegativePrompt;
+  const sourceNegative = String(result.negativePrompt || "").trim();
   return Boolean(
-    looksLikeCleanChinese(modes?.concise) ||
-      looksLikeCleanChinese(modes?.detailed) ||
-      looksLikeCleanChinese(modes?.pro) ||
-      looksLikeCleanChinese(negative)
+    looksLikeCleanChinese(localizedPrompt) &&
+      (!sourceNegative || containsChineseText(sourceNegative) || looksLikeCleanChinese(localizedNegative))
   );
 }
 
@@ -548,9 +602,8 @@ function looksLikeCleanChinese(value) {
 }
 
 function normalizeVariants(result) {
-  if (result?.concise || result?.detailed || result?.pro) {
+  if (result?.detailed || result?.pro) {
     return {
-      concise: result.concise || {},
       detailed: result.detailed || {},
       pro: result.pro || {}
     };
@@ -563,12 +616,11 @@ function normalizeVariants(result) {
     flux: result?.flux || ""
   };
 
-  return { concise: fallback, detailed: fallback, pro: fallback };
+  return { detailed: fallback, pro: fallback };
 }
 
 function normalizeModes(result, fallbackPrompt = "") {
   return {
-    concise: result?.concise || fallbackPrompt || "",
     detailed: result?.detailed || fallbackPrompt || "",
     pro: result?.pro || result?.detailed || fallbackPrompt || ""
   };
@@ -727,18 +779,15 @@ async function tryParsePngPromptMetadata(file) {
     negativePrompt: parsed.negativePrompt,
     localizedNegativePrompt: "",
     promptModes: {
-      concise: parsed.prompt,
       detailed: parsed.prompt,
       pro: parsed.prompt
     },
     localizedPromptModes: null,
     promptVariants: {
-      concise: { general: parsed.prompt, midjourney: parsed.prompt, sdxl: parsed.prompt, flux: parsed.prompt },
       detailed: { general: parsed.prompt, midjourney: parsed.prompt, sdxl: parsed.prompt, flux: parsed.prompt },
       pro: { general: parsed.prompt, midjourney: parsed.prompt, sdxl: parsed.prompt, flux: parsed.prompt }
     },
-    localizedPromptVariants: null,
-    localizedBundleFresh: false
+    localizedPromptVariants: null
   };
 }
 

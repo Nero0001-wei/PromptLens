@@ -232,9 +232,14 @@ async function routeRequest(request) {
 }
 
 async function handleTranslatePrompts(body) {
+  const promptText = String(body.promptText || "").trim();
+  const negativePrompt = String(body.negativePrompt || "").trim();
+  if (promptText) {
+    return buildLocalizedSinglePrompt(promptText, negativePrompt);
+  }
+
   const promptModes = normalizeIncomingPromptModes(body.promptModes);
   const promptVariants = normalizeIncomingPromptVariants(body.promptVariants, promptModes);
-  const negativePrompt = String(body.negativePrompt || "").trim();
   return buildLocalizedPromptBundle(promptModes, promptVariants, negativePrompt);
 }
 
@@ -295,7 +300,6 @@ async function buildMetadataResult(metadata) {
   const prompt = metadata.prompt || "";
   const negativePrompt = metadata.negativePrompt || "";
   const promptModes = {
-    concise: prompt,
     detailed: prompt,
     pro: prompt
   };
@@ -537,11 +541,10 @@ async function analyzeImageWithGlm(dataUrl) {
             {
               type: "text",
               text:
-                "Analyze this image and reconstruct AI-generation prompts in three density levels. " +
-                "Return strict JSON with keys: sceneType, concisePrompt, detailedPrompt, proPrompt, negativePrompt, styleTags, subjectTags, styleProfile, reasoning, confidence. " +
+                "Analyze this image and reconstruct AI-generation prompts in two density levels. " +
+                "Return strict JSON with keys: sceneType, detailedPrompt, proPrompt, negativePrompt, styleTags, subjectTags, styleProfile, reasoning, confidence. " +
                 `sceneType must be one of: ${SCENE_TYPES.join(", ")}. ` +
                 "All prompt fields must be English generation-ready prompts, not plain captions. " +
-                "concisePrompt should be 18 to 35 English words and cover the essentials only. " +
                 "detailedPrompt should be 40 to 80 English words and include subject, art style, rendering or medium, colors, outfit, background, framing or composition, lighting, and quality detail. " +
                 "proPrompt should be 70 to 140 English words and can include richer material, facial, lens, atmosphere, rendering, and lighting details when visually justified. " +
                 "negativePrompt must be an English comma-separated string and must not conflict with the detected style. " +
@@ -598,7 +601,6 @@ async function analyzeImageWithGlm(dataUrl) {
   }
 
   const rawPromptTexts = [
-    parsed.concisePrompt,
     parsed.detailedPrompt,
     parsed.proPrompt,
     parsed.prompt
@@ -939,17 +941,14 @@ function enrichPrompt(prompt, styleTags, subjectTags, styleProfile, sceneType) {
 }
 
 function buildPromptModes(parsed, styleTags, subjectTags, styleProfile, sceneType) {
-  const conciseSeed = String(parsed.concisePrompt || parsed.prompt || "").trim();
-  const detailedSeed = String(parsed.detailedPrompt || parsed.prompt || conciseSeed).trim();
+  const detailedSeed = String(parsed.detailedPrompt || parsed.prompt || parsed.concisePrompt || "").trim();
   const proSeed =
     String(parsed.proPrompt || parsed.detailedPrompt || parsed.prompt || detailedSeed).trim();
 
-  const concise = tightenPrompt(finalizePromptText(enrichPrompt(conciseSeed, styleTags, subjectTags, styleProfile, sceneType), sceneType), 38);
   const detailed = finalizePromptText(enrichPrompt(detailedSeed, styleTags, subjectTags, styleProfile, sceneType), sceneType);
   const pro = finalizePromptText(enrichProfessionalPrompt(proSeed, styleTags, subjectTags, styleProfile, sceneType), sceneType);
 
   return {
-    concise,
     detailed,
     pro
   };
@@ -963,7 +962,6 @@ function buildPromptModesFromSinglePrompt(prompt, styleTags, subjectTags) {
     sceneType
   );
   return {
-    concise: tightenPrompt(detailed, 38),
     detailed,
     pro: finalizePromptText(
       enrichProfessionalPrompt(detailed, styleTags, subjectTags, styleProfile, sceneType),
@@ -1830,9 +1828,8 @@ function buildPromptVariants(prompt) {
 
 function buildPromptVariantMatrix(promptModes) {
   return {
-    concise: buildPromptVariants(promptModes.concise || ""),
-    detailed: buildPromptVariants(promptModes.detailed || promptModes.concise || ""),
-    pro: buildPromptVariants(promptModes.pro || promptModes.detailed || promptModes.concise || "")
+    detailed: buildPromptVariants(promptModes.detailed || ""),
+    pro: buildPromptVariants(promptModes.pro || promptModes.detailed || "")
   };
 }
 
@@ -1844,7 +1841,6 @@ async function buildLocalizedPromptBundle(promptModes, promptVariants, negativeP
   };
 
   const promptTexts = [
-    promptModes?.concise,
     promptModes?.detailed,
     promptModes?.pro,
     negativePrompt
@@ -1882,6 +1878,82 @@ async function buildLocalizedPromptBundle(promptModes, promptVariants, negativeP
     console.error("Prompt localization failed:", error);
     return englishBundle;
   }
+}
+
+async function buildLocalizedSinglePrompt(promptText, negativePrompt) {
+  const sourcePrompt = String(promptText || "").trim();
+  const sourceNegative = String(negativePrompt || "").trim();
+
+  if (!sourcePrompt) {
+    const error = new Error("promptText is required");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (containsChinese(sourcePrompt) && (!sourceNegative || containsChinese(sourceNegative))) {
+    return {
+      localizedPrompt: sourcePrompt,
+      localizedNegativePrompt: sourceNegative
+    };
+  }
+
+  const apiKey = process.env.ZHIPU_API_KEY;
+  if (!apiKey) {
+    const error = new Error("ZHIPU_API_KEY is not configured");
+    error.statusCode = 500;
+    throw error;
+  }
+
+  const entries = [{ id: "t0", text: sourcePrompt }];
+  if (sourceNegative) {
+    entries.push({ id: "t1", text: sourceNegative });
+  }
+
+  const requiredTermHints = collectRequiredTranslationTerms(`${sourcePrompt} ${sourceNegative}`);
+  let translations = await translateEntryChunkWithGlm(apiKey, entries, requiredTermHints);
+  let result = cleanTranslatedSinglePrompt(translations, sourcePrompt, sourceNegative);
+  let validation = validateTranslatedSinglePromptFidelity(result, sourcePrompt, sourceNegative);
+
+  if (!validation.ok) {
+    translations = await translateEntryChunkWithGlm(apiKey, entries, requiredTermHints, {
+      previousTranslationRejected: true,
+      reason: "The previous single-prompt translation lost source information or left invalid output.",
+      issues: validation.issues,
+      requiredAction:
+        "Translate the original English prompt sentence by sentence. Preserve every concrete subject/object explicitly. Do not summarize or convert to tags."
+    });
+    result = cleanTranslatedSinglePrompt(translations, sourcePrompt, sourceNegative);
+    validation = validateTranslatedSinglePromptFidelity(result, sourcePrompt, sourceNegative);
+  }
+
+  if (!validation.ok) {
+    console.warn("Single prompt localization validation failed:", validation.issues);
+    const error = new Error("中文翻译结果不可用，请稍后重试");
+    error.statusCode = 502;
+    throw error;
+  }
+
+  return result;
+}
+
+function cleanTranslatedSinglePrompt(translations, sourcePrompt, sourceNegative) {
+  return {
+    localizedPrompt: cleanTranslatedPromptText(translations.t0 || translations.prompt || sourcePrompt || ""),
+    localizedNegativePrompt: cleanTranslatedPromptText(translations.t1 || translations.negativePrompt || sourceNegative || "")
+  };
+}
+
+function validateTranslatedSinglePromptFidelity(result, sourcePrompt, sourceNegative) {
+  const issues = [];
+  validateTranslatedField(issues, "prompt", result.localizedPrompt, sourcePrompt);
+  if (sourceNegative) {
+    validateTranslatedField(issues, "negativePrompt", result.localizedNegativePrompt, sourceNegative);
+  }
+
+  return {
+    ok: issues.length === 0,
+    issues: dedupeStrings(issues).slice(0, 12)
+  };
 }
 
 async function translatePromptBundleWithGlm(apiKey, promptModes, promptVariants, negativePrompt, repairContext) {
@@ -2025,13 +2097,8 @@ function buildTranslationRequest(promptModes, promptVariants, negativePrompt) {
     pathToId[pathName] = id;
   };
 
-  add("promptModes.concise", promptModes?.concise);
-  add("promptModes.detailed", promptModes?.detailed || promptModes?.concise);
-  add("promptModes.pro", promptModes?.pro || promptModes?.detailed || promptModes?.concise);
-  add("promptVariants.concise.general", promptVariants?.concise?.general);
-  add("promptVariants.concise.midjourney", promptVariants?.concise?.midjourney);
-  add("promptVariants.concise.sdxl", promptVariants?.concise?.sdxl);
-  add("promptVariants.concise.flux", promptVariants?.concise?.flux);
+  add("promptModes.detailed", promptModes?.detailed);
+  add("promptModes.pro", promptModes?.pro || promptModes?.detailed);
   add("promptVariants.detailed.general", promptVariants?.detailed?.general);
   add("promptVariants.detailed.midjourney", promptVariants?.detailed?.midjourney);
   add("promptVariants.detailed.sdxl", promptVariants?.detailed?.sdxl);
@@ -2051,17 +2118,10 @@ function expandTranslatedPromptBundle(parsed, translationRequest) {
 
   return {
     promptModes: {
-      concise: textForPath("promptModes.concise"),
       detailed: textForPath("promptModes.detailed"),
       pro: textForPath("promptModes.pro")
     },
     promptVariants: {
-      concise: {
-        general: textForPath("promptVariants.concise.general"),
-        midjourney: textForPath("promptVariants.concise.midjourney"),
-        sdxl: textForPath("promptVariants.concise.sdxl"),
-        flux: textForPath("promptVariants.concise.flux")
-      },
       detailed: {
         general: textForPath("promptVariants.detailed.general"),
         midjourney: textForPath("promptVariants.detailed.midjourney"),
@@ -2097,7 +2157,6 @@ function normalizeTranslationMap(parsed) {
 
 function clonePromptVariantMatrix(promptVariants) {
   return {
-    concise: { ...promptVariants.concise },
     detailed: { ...promptVariants.detailed },
     pro: { ...promptVariants.pro }
   };
@@ -2105,8 +2164,7 @@ function clonePromptVariantMatrix(promptVariants) {
 
 function bundleHasChinese(bundle) {
   return Boolean(
-    containsChinese(bundle.localizedPromptModes?.concise) ||
-      containsChinese(bundle.localizedPromptModes?.detailed) ||
+    containsChinese(bundle.localizedPromptModes?.detailed) ||
       containsChinese(bundle.localizedPromptModes?.pro) ||
       containsChinese(bundle.localizedNegativePrompt)
   );
@@ -2114,13 +2172,8 @@ function bundleHasChinese(bundle) {
 
 function bundleHasJsonLeak(bundle) {
   const texts = [
-    bundle.localizedPromptModes?.concise,
     bundle.localizedPromptModes?.detailed,
     bundle.localizedPromptModes?.pro,
-    bundle.localizedPromptVariants?.concise?.general,
-    bundle.localizedPromptVariants?.concise?.midjourney,
-    bundle.localizedPromptVariants?.concise?.sdxl,
-    bundle.localizedPromptVariants?.concise?.flux,
     bundle.localizedPromptVariants?.detailed?.general,
     bundle.localizedPromptVariants?.detailed?.midjourney,
     bundle.localizedPromptVariants?.detailed?.sdxl,
@@ -2141,13 +2194,8 @@ function bundleLooksTranslated(bundle) {
 
 function bundleEnglishResidualWords(bundle) {
   const texts = [
-    bundle.localizedPromptModes?.concise,
     bundle.localizedPromptModes?.detailed,
     bundle.localizedPromptModes?.pro,
-    bundle.localizedPromptVariants?.concise?.general,
-    bundle.localizedPromptVariants?.concise?.midjourney,
-    bundle.localizedPromptVariants?.concise?.sdxl,
-    bundle.localizedPromptVariants?.concise?.flux,
     bundle.localizedPromptVariants?.detailed?.general,
     bundle.localizedPromptVariants?.detailed?.midjourney,
     bundle.localizedPromptVariants?.detailed?.sdxl,
@@ -2165,22 +2213,17 @@ function bundleEnglishResidualWords(bundle) {
 function cleanTranslatedPromptBundle(translated, promptModes, promptVariants, negativePrompt) {
   const translatedModes = translated.promptModes || {};
   const localizedPromptModes = {
-    concise: cleanTranslatedPromptText(translatedModes.concise || translatedModes.detailed || translatedModes.pro || promptModes.concise || ""),
     detailed: cleanTranslatedPromptText(
       translatedModes.detailed ||
         translatedModes.pro ||
-        translatedModes.concise ||
         promptModes.detailed ||
-        promptModes.concise ||
         ""
     ),
     pro: cleanTranslatedPromptText(
       translatedModes.pro ||
         translatedModes.detailed ||
-        translatedModes.concise ||
         promptModes.pro ||
         promptModes.detailed ||
-        promptModes.concise ||
         ""
     )
   };
@@ -2188,7 +2231,6 @@ function cleanTranslatedPromptBundle(translated, promptModes, promptVariants, ne
   return {
     localizedPromptModes,
     localizedPromptVariants: {
-      concise: cleanTranslatedVariantRow(translated.promptVariants?.concise, localizedPromptModes.concise),
       detailed: cleanTranslatedVariantRow(translated.promptVariants?.detailed, localizedPromptModes.detailed),
       pro: cleanTranslatedVariantRow(translated.promptVariants?.pro, localizedPromptModes.pro)
     },
@@ -2222,10 +2264,8 @@ function cleanTranslatedPromptText(text) {
 
 function validateTranslatedBundleFidelity(bundle, promptModes, promptVariants, negativePrompt) {
   const issues = [];
-  validateTranslatedField(issues, "promptModes.concise", bundle.localizedPromptModes?.concise, promptModes?.concise);
-  validateTranslatedField(issues, "promptModes.detailed", bundle.localizedPromptModes?.detailed, promptModes?.detailed || promptModes?.concise);
-  validateTranslatedField(issues, "promptModes.pro", bundle.localizedPromptModes?.pro, promptModes?.pro || promptModes?.detailed || promptModes?.concise);
-  validateTranslatedVariantRow(issues, "promptVariants.concise", bundle.localizedPromptVariants?.concise, promptVariants?.concise);
+  validateTranslatedField(issues, "promptModes.detailed", bundle.localizedPromptModes?.detailed, promptModes?.detailed);
+  validateTranslatedField(issues, "promptModes.pro", bundle.localizedPromptModes?.pro, promptModes?.pro || promptModes?.detailed);
   validateTranslatedVariantRow(issues, "promptVariants.detailed", bundle.localizedPromptVariants?.detailed, promptVariants?.detailed);
   validateTranslatedVariantRow(issues, "promptVariants.pro", bundle.localizedPromptVariants?.pro, promptVariants?.pro);
   validateTranslatedField(issues, "negativePrompt", bundle.localizedNegativePrompt, negativePrompt);
@@ -2305,13 +2345,8 @@ function getOrdinaryEnglishWords(text) {
 
 function collectRequiredTranslationTermsFromBundle(promptModes, promptVariants, negativePrompt) {
   const texts = [
-    promptModes?.concise,
     promptModes?.detailed,
     promptModes?.pro,
-    promptVariants?.concise?.general,
-    promptVariants?.concise?.midjourney,
-    promptVariants?.concise?.sdxl,
-    promptVariants?.concise?.flux,
     promptVariants?.detailed?.general,
     promptVariants?.detailed?.midjourney,
     promptVariants?.detailed?.sdxl,
@@ -2415,19 +2450,18 @@ function escapeRegExp(text) {
 }
 
 function normalizeIncomingPromptModes(promptModes) {
+  const fallback = String(promptModes?.detailed || promptModes?.concise || "").trim();
   return {
-    concise: String(promptModes?.concise || "").trim(),
-    detailed: String(promptModes?.detailed || promptModes?.concise || "").trim(),
-    pro: String(promptModes?.pro || promptModes?.detailed || promptModes?.concise || "").trim()
+    detailed: fallback,
+    pro: String(promptModes?.pro || fallback).trim()
   };
 }
 
 function normalizeIncomingPromptVariants(promptVariants, promptModes) {
   if (promptVariants?.concise || promptVariants?.detailed || promptVariants?.pro) {
     return {
-      concise: normalizeIncomingVariantRow(promptVariants.concise, promptModes.concise),
-      detailed: normalizeIncomingVariantRow(promptVariants.detailed, promptModes.detailed || promptModes.concise),
-      pro: normalizeIncomingVariantRow(promptVariants.pro, promptModes.pro || promptModes.detailed || promptModes.concise)
+      detailed: normalizeIncomingVariantRow(promptVariants.detailed || promptVariants.concise, promptModes.detailed),
+      pro: normalizeIncomingVariantRow(promptVariants.pro, promptModes.pro || promptModes.detailed)
     };
   }
 
