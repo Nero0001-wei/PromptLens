@@ -16,6 +16,14 @@
       </header>
 
       <section class="settings-body">
+        <section class="settings-card settings-card--environment">
+          <div>
+            <h2>当前连接环境</h2>
+            <p id="environmentHint">根据后端地址自动识别当前连接的函数环境。</p>
+          </div>
+          <span id="environmentBadge" class="environment-badge environment-badge--unknown">未配置</span>
+        </section>
+
         <section class="settings-card">
           <h2>后端地址</h2>
           <p>填写你的阿里云函数计算公网地址。</p>

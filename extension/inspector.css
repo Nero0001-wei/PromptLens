@@ -35,6 +35,14 @@ body {
   justify-content: center;
 }
 
+body.settings-page {
+  min-width: 720px;
+  min-height: 100vh;
+  align-items: flex-start;
+  overflow: auto;
+  background: #f6f8fb;
+}
+
 button,
 input,
 textarea {
@@ -395,4 +403,157 @@ button {
 
 .is-hidden {
   display: none !important;
+}
+
+.settings-shell {
+  width: min(760px, calc(100vw - 32px));
+  margin: 24px auto;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--panel-bg);
+  box-shadow: 0 8px 30px rgba(15, 23, 42, 0.08);
+  overflow: hidden;
+}
+
+.panel__header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--line);
+}
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: var(--brand-dark);
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.18);
+}
+
+.brand-mark img {
+  width: 28px;
+  height: 28px;
+}
+
+.brand-title {
+  margin: 0;
+  color: var(--brand-dark);
+  font-size: 22px;
+  line-height: 1.25;
+  font-weight: 700;
+}
+
+.settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 22px 22px;
+}
+
+.settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--surface-border);
+  border-radius: 14px;
+  background: #ffffff;
+}
+
+.settings-card--environment {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.settings-card h2 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 700;
+}
+
+.settings-card p {
+  margin: 0;
+  color: var(--text-main);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.settings-input {
+  width: 100%;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--surface-border);
+  border-radius: 12px;
+  outline: none;
+  color: var(--text-strong);
+  background: var(--surface);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.settings-input:focus {
+  border-color: var(--brand-blue);
+  box-shadow: 0 0 0 3px rgba(33, 137, 255, 0.12);
+}
+
+#backendBaseUrl {
+  font-family: Consolas, "SFMono-Regular", "Microsoft YaHei", monospace;
+  font-size: 13px;
+}
+
+.environment-badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 116px;
+  height: 34px;
+  padding: 0 14px;
+  border-radius: var(--radius-pill);
+  color: #ffffff;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.environment-badge--dev {
+  background: #2563eb;
+}
+
+.environment-badge--prod {
+  background: #b42318;
+}
+
+.environment-badge--custom {
+  background: #7c3aed;
+}
+
+.environment-badge--unknown {
+  background: #667085;
+}
+
+.settings-save {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 180px;
+  height: 42px;
+  border-radius: var(--radius-pill);
+  background: var(--brand-dark);
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.settings-save:hover {
+  opacity: 0.92;
 }
