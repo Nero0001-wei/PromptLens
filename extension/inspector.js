@@ -107,6 +107,18 @@ function bindEvents() {
       return;
     }
 
+    if (message.imageSource?.imageBase64) {
+      setCurrentImage({
+        kind: "capture",
+        imageBase64: message.imageSource.imageBase64,
+        previewUrl: message.imageSource.previewUrl || message.imageSource.imageBase64,
+        imageUrl: message.imageSource.imageUrl || "",
+        pageTitle: message.imageSource.pageTitle || "",
+        pageUrl: message.imageSource.pageUrl || ""
+      });
+      return;
+    }
+
     if (message.imageSource?.imageUrl) {
       setCurrentImage({
         kind: "url",
@@ -122,7 +134,19 @@ async function loadContextMenuImageOnce() {
   const { lastImageSource } = await chrome.storage.local.get(["lastImageSource"]);
   await chrome.storage.local.remove(["lastImageSource"]);
 
-  if (!lastImageSource?.imageUrl) {
+  if (!lastImageSource?.imageUrl && !lastImageSource?.imageBase64) {
+    return;
+  }
+
+  if (lastImageSource.imageBase64) {
+    setCurrentImage({
+      kind: "capture",
+      imageBase64: lastImageSource.imageBase64,
+      previewUrl: lastImageSource.previewUrl || lastImageSource.imageBase64,
+      imageUrl: lastImageSource.imageUrl || "",
+      pageTitle: lastImageSource.pageTitle || "",
+      pageUrl: lastImageSource.pageUrl || ""
+    });
     return;
   }
 
@@ -231,7 +255,7 @@ function setCurrentImage(nextState) {
 
   uploadEmpty.classList.add("is-hidden");
   uploadPreview.classList.remove("is-hidden");
-  previewImage.src = nextState.previewUrl || nextState.imageUrl || "";
+  previewImage.src = nextState.previewUrl || nextState.imageBase64 || nextState.imageUrl || "";
   previewImage.alt = nextState.fileName || nextState.pageTitle || "图片预览";
 
   generateButton.disabled = false;
@@ -372,6 +396,12 @@ function stopGenerateLoading() {
 }
 
 async function buildPayloadFromCurrentImage(imageState) {
+  if (imageState.imageBase64) {
+    return {
+      imageBase64: imageState.imageBase64
+    };
+  }
+
   if (imageState.kind === "file") {
     const dataUrl = await prepareImageDataUrl(imageState.file);
     return {

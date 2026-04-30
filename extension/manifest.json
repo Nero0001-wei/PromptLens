@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "PromptLens",
   "short_name": "PromptLens",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Generate reusable AI art prompts from web images or uploaded pictures.",
   "icons": {
     "16": "assets/icon-16.png",
@@ -11,13 +11,12 @@
     "128": "assets/icon-128.png"
   },
   "permissions": [
+    "activeTab",
     "contextMenus",
+    "scripting",
     "storage",
     "tabs",
     "windows"
-  ],
-  "host_permissions": [
-    "<all_urls>"
   ],
   "background": {
     "service_worker": "background.js"
