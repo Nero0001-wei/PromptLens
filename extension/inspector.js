@@ -30,6 +30,7 @@ let previewObjectUrl = null;
 let isGenerating = false;
 let resizeTimer = null;
 let resizeObserver = null;
+let statusTimer = null;
 
 init();
 
@@ -657,15 +658,23 @@ async function onCopyText(text) {
 }
 
 function setStatus(message, kind = "success") {
+  if (statusTimer) {
+    clearTimeout(statusTimer);
+  }
+
   statusMessage.textContent = message;
-  statusMessage.className = `status-message ${kind === "error" ? "is-error" : "is-success"}`;
-  scheduleWindowResize();
+  statusMessage.className = `toast-message ${kind === "error" ? "is-error" : "is-success"}`;
+  statusTimer = setTimeout(clearStatus, 3000);
 }
 
 function clearStatus() {
+  if (statusTimer) {
+    clearTimeout(statusTimer);
+    statusTimer = null;
+  }
+
   statusMessage.textContent = "";
-  statusMessage.className = "status-message is-hidden";
-  scheduleWindowResize();
+  statusMessage.className = "toast-message is-hidden";
 }
 
 function fileToDataUrl(file) {

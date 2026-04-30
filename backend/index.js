@@ -2027,6 +2027,7 @@ async function requestTranslationEntryChunk(apiKey, entries, requiredTermHints, 
             "Every subject, object, count-like list item, color, material, lighting, composition, environment, and spatial relation in the English source must remain present in Chinese. " +
             "If the source lists objects such as airplane, truck, ship, containers, boxes, buildings, people, products, or devices, translate every listed object explicitly. " +
             "Do not replace concrete objects with abstract words like scene, concept, product, logistics, technology, or environment. " +
+            "If the source contains short unreadable all-caps OCR or watermark text, translate it as unreadable text mark instead of keeping the raw letters. " +
             "Return strict JSON only in this shape: {\"translations\":{\"t0\":\"Chinese translation\",\"t1\":\"Chinese translation\"}}. Keep every entry id exactly. " +
             "Do not output markdown, code fences, explanations, or nested JSON strings. " +
             "Do not leave ordinary English words in the Chinese result. Translate abbreviations such as CGI, AI, UI, and UX into natural Chinese. " +
@@ -2257,6 +2258,10 @@ function cleanTranslatedPromptText(text) {
     .replace(/\bAI\b/gi, "人工智能")
     .replace(/\bUI\b/gi, "用户界面")
     .replace(/\bUX\b/gi, "用户体验")
+    .replace(/\bLED\b/gi, "LED灯")
+    .replace(/\b[A-Z]{2,6}\b/g, (word) => (isPreservedPromptEnglishToken(word) ? word : "文字标识"))
+    .replace(/不可读的文字标识标记/g, "不可读文字标识")
+    .replace(/不可读文字标识标记/g, "不可读文字标识")
     .replace(/\s+/g, " ")
     .replace(/\s*([，。；、])\s*/g, "$1")
     .trim();
@@ -2326,7 +2331,6 @@ function validateTranslatedField(issues, pathName, localizedText, sourceText) {
 }
 
 function getOrdinaryEnglishWords(text) {
-  const whitelist = new Set(["3D", "SDXL", "Flux", "Midjourney", "MJ"]);
   const sourceWithoutFlags = stripGenerationFlags(text);
   const matches = sourceWithoutFlags.match(/\b[a-zA-Z][a-zA-Z'-]*\b/g) || [];
   return dedupeStrings(
@@ -2335,12 +2339,31 @@ function getOrdinaryEnglishWords(text) {
       if (!normalized) {
         return false;
       }
-      if (/^FLAG_\d+$/i.test(normalized)) {
+      if (isIgnorableEnglishArtifact(normalized)) {
         return false;
       }
-      return !Array.from(whitelist).some((allowed) => normalized.toLowerCase() === allowed.toLowerCase());
+      return !isPreservedPromptEnglishToken(normalized);
     })
   );
+}
+
+function isPreservedPromptEnglishToken(word) {
+  const normalized = String(word || "").replace(/[^a-zA-Z0-9]/g, "");
+  const whitelist = new Set(["3D", "SDXL", "Flux", "Midjourney", "MJ"]);
+  return Array.from(whitelist).some((allowed) => normalized.toLowerCase() === allowed.toLowerCase());
+}
+
+function isIgnorableEnglishArtifact(word) {
+  const normalized = String(word || "").replace(/[^a-zA-Z]/g, "");
+  if (!normalized) {
+    return true;
+  }
+  if (/^FLAG_\d+$/i.test(normalized)) {
+    return true;
+  }
+  // Short all-caps strings are usually OCR/watermark artifacts in source images,
+  // for example "THKT"; they should not make an otherwise valid translation fail.
+  return /^[A-Z]{2,6}$/.test(normalized);
 }
 
 function stripGenerationFlags(text) {
@@ -2405,8 +2428,8 @@ function getRequiredTranslationTermMap() {
     { en: "solar panels", pattern: /\bsolar panel(s)?\b/i, zh: ["太阳能板"] },
     { en: "Earth", pattern: /\bEarth\b/i, zh: ["地球"] },
     { en: "planet", pattern: /\bplanet(ary)?\b/i, zh: ["星球"] },
-    { en: "cloud icon", pattern: /\bcloud icon\b/i, zh: ["云朵图标"] },
-    { en: "cloud", pattern: /\bcloud\b/i, zh: ["云朵"] },
+    { en: "cloud icon", pattern: /\bcloud icon\b/i, zh: ["云朵图标", "云图标", "云形图标", "云服务图标"] },
+    { en: "cloud", pattern: /\bcloud\b/i, zh: ["云朵", "云", "云形", "云端", "云服务"] },
     { en: "bar chart", pattern: /\bbar chart(s)?\b/i, zh: ["柱状图"] },
     { en: "pie chart", pattern: /\bpie chart(s)?\b/i, zh: ["饼图"] },
     { en: "dashboard", pattern: /\bdashboard(s)?\b/i, zh: ["数据看板", "看板"] },

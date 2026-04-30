@@ -176,15 +176,17 @@ button {
 }
 
 .generate-button {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 8px;
   width: 100%;
   height: 40px;
   padding: 8px 0;
   border-radius: 20px;
-  background: linear-gradient(90deg, #2189ff 0%, #6a5ef3 50%, #e406f8 100%);
-  background-size: 240% 100%;
+  background: linear-gradient(90deg, #2189ff 0%, #4f6bff 38%, #bd18ff 72%, #e406f8 100%);
+  background-size: 260% 100%;
   color: #ffffff;
   font-size: 16px;
   line-height: 24px;
@@ -193,17 +195,42 @@ button {
   transition: opacity 0.2s ease, transform 0.2s ease;
 }
 
+.generate-button::before {
+  content: "✦";
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: #ffffff;
+  font-size: 16px;
+  line-height: 1;
+  opacity: 0;
+  transform: translateX(-8px) rotate(0deg) scale(0.92);
+}
+
+.generate-button:not(.is-loading)::before {
+  display: none;
+}
+
 .generate-button:hover:not(:disabled) {
   transform: translateY(-1px);
 }
 
-.generate-button:disabled {
+.generate-button:disabled:not(.is-loading) {
   opacity: 0.58;
   cursor: not-allowed;
 }
 
 .generate-button.is-loading {
-  animation: gradient-loading 5.4s linear infinite;
+  opacity: 1;
+  cursor: progress;
+  animation: gradient-loading 4.8s ease-in-out infinite;
+}
+
+.generate-button.is-loading::before {
+  opacity: 1;
+  animation: spark-roll 1.8s ease-in-out infinite;
 }
 
 @keyframes gradient-loading {
@@ -218,19 +245,68 @@ button {
   }
 }
 
-.status-message {
-  margin: 0;
-  font-size: 12px;
-  line-height: 18px;
-  color: var(--text-main);
+@keyframes spark-roll {
+  0% {
+    transform: translateX(-8px) rotate(-18deg) scale(0.9);
+    opacity: 0.55;
+  }
+  50% {
+    transform: translateX(8px) rotate(180deg) scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(-8px) rotate(342deg) scale(0.9);
+    opacity: 0.55;
+  }
 }
 
-.status-message.is-error {
+.toast-message {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 18px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+  text-align: center;
+  transition: opacity 0.18s ease, visibility 0.18s ease;
+}
+
+.toast-message.is-hidden {
+  visibility: hidden;
+  opacity: 0;
+}
+
+.toast-message.is-error {
   color: #b42318;
 }
 
-.status-message.is-success {
-  color: #2563eb;
+.toast-message.is-success {
+  animation: toast-gradient-loading 4.8s ease-in-out infinite;
+  background: linear-gradient(90deg, #2189ff 0%, #4f6bff 38%, #bd18ff 72%, #e406f8 100%);
+  background-size: 260% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+@keyframes toast-gradient-loading {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
 }
 
 .result-panel {
