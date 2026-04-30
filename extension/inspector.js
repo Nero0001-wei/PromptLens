@@ -464,15 +464,9 @@ function getLocalizedCurrentPromptText(result = currentResult) {
   }
 
   const variants = normalizeVariants(result.localizedPromptVariants || {});
-  const modes = normalizeModes(result.localizedPromptModes || {}, "");
   const activeVariants = variants[currentModeKey] || {};
 
-  return (
-    activeVariants[currentVariantKey] ||
-    activeVariants.general ||
-    modes[currentModeKey] ||
-    ""
-  );
+  return activeVariants[currentVariantKey] || "";
 }
 
 async function ensureLocalizedCurrentPrompt() {
@@ -597,8 +591,12 @@ function looksLikeCleanChinese(value) {
     return false;
   }
 
-  const englishWords = text.match(/\b[a-zA-Z]{2,}\b/g) || [];
+  const englishWords = stripGenerationFlags(text).match(/\b[a-zA-Z]{2,}\b/g) || [];
   return englishWords.length <= 1;
+}
+
+function stripGenerationFlags(value) {
+  return String(value || "").replace(/--[a-zA-Z][a-zA-Z0-9-]*(?:[=\s]+[^\s,，。；;]+)?/g, " ");
 }
 
 function normalizeVariants(result) {

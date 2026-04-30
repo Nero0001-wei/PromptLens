@@ -2030,7 +2030,7 @@ async function requestTranslationEntryChunk(apiKey, entries, requiredTermHints, 
             "Return strict JSON only in this shape: {\"translations\":{\"t0\":\"Chinese translation\",\"t1\":\"Chinese translation\"}}. Keep every entry id exactly. " +
             "Do not output markdown, code fences, explanations, or nested JSON strings. " +
             "Do not leave ordinary English words in the Chinese result. Translate abbreviations such as CGI, AI, UI, and UX into natural Chinese. " +
-            "Preserve only model names or generation flags such as Midjourney, SDXL, Flux, 3D, --ar, --v, --style."
+            "Preserve model names and generation flags exactly, including Midjourney, SDXL, Flux, 3D, --ar, --stylize, --style, --v, and their values. Do not translate, delete, or reorder generation flags."
         },
         {
           role: "user",
@@ -2327,7 +2327,7 @@ function validateTranslatedField(issues, pathName, localizedText, sourceText) {
 
 function getOrdinaryEnglishWords(text) {
   const whitelist = new Set(["3D", "SDXL", "Flux", "Midjourney", "MJ"]);
-  const sourceWithoutFlags = String(text || "").replace(/--[a-zA-Z0-9:-]+(?:\s+[a-zA-Z0-9:./-]+)?/g, " ");
+  const sourceWithoutFlags = stripGenerationFlags(text);
   const matches = sourceWithoutFlags.match(/\b[a-zA-Z][a-zA-Z'-]*\b/g) || [];
   return dedupeStrings(
     matches.filter((word) => {
@@ -2341,6 +2341,10 @@ function getOrdinaryEnglishWords(text) {
       return !Array.from(whitelist).some((allowed) => normalized.toLowerCase() === allowed.toLowerCase());
     })
   );
+}
+
+function stripGenerationFlags(text) {
+  return String(text || "").replace(/--[a-zA-Z][a-zA-Z0-9-]*(?:[=\s]+[^\s,，。；;]+)?/g, " ");
 }
 
 function collectRequiredTranslationTermsFromBundle(promptModes, promptVariants, negativePrompt) {
